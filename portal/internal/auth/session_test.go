@@ -120,3 +120,53 @@ func TestPurgeAndDeleteAll(t *testing.T) {
 		t.Fatalf("DeleteAll removed %d, want 1", n)
 	}
 }
+
+func TestShortSessionDoesNotSlide(t *testing.T) {
+	s, now := newTestStore(t)
+	tok, err := s.CreateWithTTL("cli", "portal sessions create: test", 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(10 * time.Minute) // past touchInterval: a normal session would slide here
+	sess, ok := s.Validate(tok)
+	if !ok {
+		t.Fatal("short session invalid before its deadline")
+	}
+	if want := time.Date(2026, 1, 1, 12, 15, 0, 0, time.UTC); !sess.ExpiresAt.Equal(want) {
+		t.Fatalf("short session slid: expires %v, want %v", sess.ExpiresAt, want)
+	}
+	*now = now.Add(6 * time.Minute) // 16 minutes after creation
+	if _, ok := s.Validate(tok); ok {
+		t.Fatal("short session still valid after its ttl")
+	}
+	for _, bad := range []time.Duration{0, -time.Second, SessionTTL + time.Second} {
+		if _, err := s.CreateWithTTL("cli", "x", bad); err == nil {
+			t.Errorf("CreateWithTTL(%v) accepted", bad)
+		}
+	}
+}
+
+func TestNormalSessionStillSlides(t *testing.T) {
+	s, now := newTestStore(t)
+	tok, _ := s.Create("100.64.0.1", "ua")
+	*now = now.Add(10 * time.Minute)
+	sess, ok := s.Validate(tok)
+	if !ok || !sess.ExpiresAt.Equal(now.Add(SessionTTL)) {
+		t.Fatalf("normal session did not slide: %+v ok=%v", sess, ok)
+	}
+}
+
+func TestDeleteOneSessionKeepsOthers(t *testing.T) {
+	s, _ := newTestStore(t)
+	a, _ := s.Create("a", "ua")
+	b, _ := s.CreateWithTTL("cli", "ua", time.Minute)
+	if err := s.Delete(b); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.Validate(b); ok {
+		t.Fatal("deleted session still valid")
+	}
+	if _, ok := s.Validate(a); !ok {
+		t.Fatal("other session was removed too")
+	}
+}

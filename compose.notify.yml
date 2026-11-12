@@ -1,0 +1,95 @@
+# Phase A: ntfy, the notification hub. Pulled into the "platform" project by
+# the include: list at the top of docker-compose.yml.
+#
+# Services publish short messages to topics (system, backups, focal, ritual,
+# dalal, general); the iPhone app and Portal's dashboard read them.
+# How to send one: NOTIFY.md. Users and tokens: scripts/ntfy-provision.sh.
+
+services:
+  ntfy:
+    # Pinned: v2.37.2 was the newest release on 12 Nov 2026. Upgrade by
+    # changing the tag on purpose (read the release notes first).
+    image: binwiederhier/ntfy:v2.37.2
+    command: ["serve", "--config", "/etc/ntfy/server.yml"]
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+    # The image would run as root. Nothing in ntfy needs root: it only
+    # writes /var/lib/ntfy (our bind mount, owned by uid 1000) and listens
+    # on port 80, which Docker allows unprivileged users to bind inside a
+    # container (net.ipv4.ip_unprivileged_port_start=0).
+    user: "${PUID}:${PGID}"
+    read_only: true               # the image itself is never written to
+    tmpfs: ["/tmp:size=8m"]       # scratch space for SQLite temp files
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+
+    # Bridge network (not the host network): ntfy needs no host access.
+    # Other containers that join "platform_internal" reach it as
+    # http://ntfy:80. The host (Caddy, Portal, scripts) uses the port below.
+    networks: [platform_internal]
+    # Loopback only. Caddy forwards http://ntfy.exp.lab here
+    # (data/apps.yaml). Nothing on the LAN or tailnet can reach 2586.
+    ports: ["127.0.0.1:2586:80"]
+
+    volumes:
+      - ./ntfy/server.yml:/etc/ntfy/server.yml:ro
+      - ./data/ntfy:/var/lib/ntfy          # cache.db (messages), auth.db (users)
+
+    environment:
+      TZ: ${TZ:-UTC}
+      # Declarative users / access rules / tokens (see ntfy/server.yml).
+      # They contain secrets, so they are assembled here from .env instead
+      # of living in the committed config. Comma-separated lists.
+      #
+      # Users: the admin (can do everything, logs into the phone app) and
+      # one "service" user per sender. Service users never log in with a
+      # password; they all share the hash of a random, discarded password.
+      NTFY_AUTH_USERS: >-
+        ${NTFY_ADMIN_USER}:${NTFY_ADMIN_PASSWORD_HASH}:admin,
+        svc-portal:${NTFY_SVC_PASSWORD_HASH}:user,
+        svc-alerts:${NTFY_SVC_PASSWORD_HASH}:user,
+        svc-backup:${NTFY_SVC_PASSWORD_HASH}:user,
+        svc-focal:${NTFY_SVC_PASSWORD_HASH}:user,
+        svc-ritual:${NTFY_SVC_PASSWORD_HASH}:user,
+        svc-dalal:${NTFY_SVC_PASSWORD_HASH}:user,
+        svc-general:${NTFY_SVC_PASSWORD_HASH}:user
+      # Access: ro = read (subscribe) only, wo = write (publish) only.
+      # Each sender may write exactly one topic and read none; Portal may
+      # read all six and write none. The admin role needs no entries.
+      NTFY_AUTH_ACCESS: >-
+        svc-portal:system:ro, svc-portal:backups:ro, svc-portal:focal:ro,
+        svc-portal:ritual:ro, svc-portal:dalal:ro, svc-portal:general:ro,
+        svc-alerts:system:wo,
+        svc-backup:backups:wo,
+        svc-focal:focal:wo,
+        svc-ritual:ritual:wo,
+        svc-dalal:dalal:wo,
+        svc-general:general:wo
+      # Tokens: "Authorization: Bearer tk_..." identifies the user.
+      NTFY_AUTH_TOKENS: >-
+        svc-portal:${NTFY_TOKEN_PORTAL}:portal,
+        svc-alerts:${NTFY_TOKEN_ALERTS}:alerts,
+        svc-backup:${NTFY_TOKEN_BACKUP}:backup,
+        svc-focal:${NTFY_TOKEN_FOCAL}:focal,
+        svc-ritual:${NTFY_TOKEN_RITUAL}:ritual,
+        svc-dalal:${NTFY_TOKEN_DALAL}:dalal,
+        svc-general:${NTFY_TOKEN_GENERAL}:general
+
+    healthcheck:
+      # /v1/health answers {"healthy":true}. wget is in the (Alpine) image.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  # Shared bridge network for platform containers that talk to each other
+  # by name (ntfy now; the backup container later). Other compose files may
+  # declare it again identically (same key, same name) to join it.
+  platform_internal:
+    name: platform_internal

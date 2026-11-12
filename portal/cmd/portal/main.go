@@ -9,6 +9,10 @@
 //	portal totp status
 //	portal sessions            list active sessions
 //	portal sessions revoke     sign out everywhere
+//	portal sessions create [--ttl 15m] [--note text]
+//	                           mint a short-lived session, print its cookie
+//	portal sessions revoke <cookie value>
+//	                           end just that one session
 //	portal healthcheck         exit 0 if the server answers (for Docker)
 package main
 
@@ -16,7 +20,9 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -50,6 +56,8 @@ func config() server.Config {
 		DockerSock:   env("PORTAL_DOCKER_SOCK", "/run/docker-proxy/docker.sock"),
 		User:         env("PORTAL_USER", "admin"),
 		CookieSecure: env("PORTAL_COOKIE_SECURE", "0") == "1",
+		NtfyURL:      os.Getenv("PORTAL_NTFY_URL"),
+		NtfyToken:    os.Getenv("PORTAL_NTFY_TOKEN"),
 	}
 }
 
@@ -87,7 +95,7 @@ func main() {
 	case "totp":
 		totp(cfg, db, arg(2))
 	case "sessions":
-		sessions(db, arg(2))
+		sessions(db, os.Args[min(2, len(os.Args)):])
 	default:
 		usage()
 		os.Exit(2)
@@ -111,6 +119,11 @@ func usage() {
   totp status
   sessions            list active sessions
   sessions revoke     sign out everywhere
+  sessions create [--ttl 15m] [--note text]
+                      start a short-lived session (for testing with curl)
+                      and print the cookie value
+  sessions revoke <cookie value>
+                      end just that one session
   healthcheck         exit 0 if the server is healthy`)
 }
 
@@ -227,15 +240,39 @@ func totp(cfg server.Config, db *sql.DB, sub string) {
 	}
 }
 
-func sessions(db *sql.DB, sub string) {
+func sessions(db *sql.DB, args []string) {
 	st := auth.NewSessionStore(db)
-	if sub == "revoke" {
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch {
+	case sub == "revoke" && len(args) > 1:
+		if err := st.Delete(args[1]); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("That session is signed out (if it existed).")
+		return
+	case sub == "revoke":
 		n, err := st.DeleteAll()
 		if err != nil {
 			log.Fatal(err)
 		}
 		fmt.Printf("%d session(s) signed out.\n", n)
 		return
+	case sub == "create":
+		token, expires, err := createSession(st, args[1:], os.Stderr)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		fmt.Fprintf(os.Stderr, "Session valid until %s. Use it as:  Cookie: portal_session=<value>\n"+
+			"End it early with:  portal sessions revoke <value>\n", expires.Local().Format("2 Jan 15:04:05"))
+		fmt.Println(token) // only the token on stdout, so scripts can capture it
+		return
+	case sub != "":
+		usage()
+		os.Exit(2)
 	}
 	list, err := st.List()
 	if err != nil {
@@ -253,6 +290,33 @@ func sessions(db *sql.DB, sub string) {
 		fmt.Printf("%-15s  last seen %s  expires %s  %s\n", s.IP,
 			s.LastSeen.Local().Format("2 Jan 15:04"), s.ExpiresAt.Local().Format("2 Jan"), ua)
 	}
+}
+
+// createSession implements "portal sessions create". It needs shell access
+// to the container (docker compose exec), which already implies full
+// control of Portal, so it grants nothing new. The session is fixed-length
+// (it does not slide with use) and is listed by "portal sessions" with the
+// IP "cli" and the note as its user agent.
+func createSession(st *auth.SessionStore, args []string, errOut io.Writer) (string, time.Time, error) {
+	fs := flag.NewFlagSet("sessions create", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	ttl := fs.Duration("ttl", 15*time.Minute, "lifetime, at most 24h")
+	note := fs.String("note", "", "label shown by 'portal sessions'")
+	if err := fs.Parse(args); err != nil {
+		return "", time.Time{}, err
+	}
+	if fs.NArg() > 0 {
+		return "", time.Time{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	// A test session has no business living longer than a day.
+	if *ttl <= 0 || *ttl > 24*time.Hour {
+		return "", time.Time{}, fmt.Errorf("--ttl must be between 1s and 24h")
+	}
+	token, err := st.CreateWithTTL("cli", "portal sessions create: "+*note, *ttl)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return token, time.Now().Add(*ttl), nil
 }
 
 // healthcheck is run by Docker inside the container. The image has no

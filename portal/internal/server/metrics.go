@@ -21,11 +21,15 @@ type Metrics struct {
 	requests map[string]uint64 // "handler|code"
 	logins   map[string]uint64 // ok, failed, rate_limited
 	verifies map[string]uint64 // allowed, denied, unknown_host
+	notifies map[string]uint64 // /api/notify results, see notifyResults
 }
+
+// notifyResults are the values of portal_notify_total{result=...}.
+var notifyResults = []string{"ok", "invalid", "unauthorized", "forbidden", "rate_limited", "upstream_error"}
 
 // NewMetrics returns zeroed counters.
 func NewMetrics() *Metrics {
-	return &Metrics{requests: map[string]uint64{}, logins: map[string]uint64{}, verifies: map[string]uint64{}}
+	return &Metrics{requests: map[string]uint64{}, logins: map[string]uint64{}, verifies: map[string]uint64{}, notifies: map[string]uint64{}}
 }
 
 func (m *Metrics) Request(handler string, code int) {
@@ -36,6 +40,7 @@ func (m *Metrics) Request(handler string, code int) {
 
 func (m *Metrics) Login(result string)  { m.mu.Lock(); m.logins[result]++; m.mu.Unlock() }
 func (m *Metrics) Verify(result string) { m.mu.Lock(); m.verifies[result]++; m.mu.Unlock() }
+func (m *Metrics) Notify(result string) { m.mu.Lock(); m.notifies[result]++; m.mu.Unlock() }
 
 func sortedKeys(m map[string]uint64) []string {
 	keys := make([]string, 0, len(m))
@@ -84,6 +89,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	b.WriteString("# HELP portal_forward_auth_total Forward-auth decisions by result.\n# TYPE portal_forward_auth_total counter\n")
 	for _, k := range []string{"allowed", "denied", "unknown_host"} {
 		fmt.Fprintf(&b, "portal_forward_auth_total{result=%q} %d\n", k, m.verifies[k])
+	}
+	b.WriteString("# HELP portal_notify_total POST /api/notify requests by result.\n# TYPE portal_notify_total counter\n")
+	for _, k := range notifyResults {
+		fmt.Fprintf(&b, "portal_notify_total{result=%q} %d\n", k, m.notifies[k])
 	}
 	m.mu.Unlock()
 

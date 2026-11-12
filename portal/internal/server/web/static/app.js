@@ -48,6 +48,23 @@
     });
   }
 
+  // ---- Notification times -------------------------------------------------
+  // "5 min ago" goes stale while the page is open; recompute it from the
+  // timestamp the server put in data-ts. Same rules as ago() in notify.go.
+  function relTime(ts) {
+    const s = Math.max(0, Date.now() / 1000 - ts);
+    if (s < 60) return 'just now';
+    if (s < 3600) return Math.floor(s / 60) + ' min ago';
+    if (s < 86400) return Math.floor(s / 3600) + ' h ago';
+    return Math.floor(s / 86400) + ' d ago';
+  }
+  function updateTimes() {
+    document.querySelectorAll('time[data-ts]').forEach(function (el) {
+      el.textContent = relTime(parseInt(el.dataset.ts, 10) || 0);
+    });
+  }
+  setInterval(updateTimes, 30000);
+
   // ---- Event stream ------------------------------------------------------
   const live = $('#live'), liveText = $('#live-text');
   function setLive(state, text) { live.dataset.state = state; liveText.textContent = text; }
@@ -76,11 +93,12 @@
       }
       if (source.readyState === EventSource.CLOSED) setTimeout(connect, 3000);
     };
-    // "apps" and "containers" carry ready-made HTML from the server's
+    // "apps", "containers" and "notify" carry ready-made HTML from the server's
     // templates; "system" carries JSON for in-place patching.
     source.addEventListener('apps', function (e) { $('#apps').innerHTML = e.data; });
     source.addEventListener('containers', function (e) { $('#containers').innerHTML = e.data; markBusy(); });
     source.addEventListener('system', function (e) { updateStats(JSON.parse(e.data)); });
+    source.addEventListener('notify', function (e) { $('#notify').innerHTML = e.data; updateTimes(); });
   }
 
   // Phones suspend background tabs and silently kill the connection.

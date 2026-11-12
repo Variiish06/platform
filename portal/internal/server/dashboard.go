@@ -61,6 +61,7 @@ type dashboardPage struct {
 	Stats         []statView
 	Apps          appsData
 	Containers    containersData
+	Notify        notifData
 }
 
 // level turns a number into "", "warn" or "bad" against two thresholds.
@@ -237,6 +238,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, "dashboard.html", dashboardPage{
 		V: s.version, Host: s.hostname, User: s.cfg.User,
 		Stats: stats, Apps: s.appsView(), Containers: s.containersView(),
+		Notify: s.notifView(),
 	})
 }
 
@@ -451,11 +453,22 @@ func (s *Server) startBackground(ctx context.Context) {
 		s.publishContainers()
 	})
 
+	// Notifications: poll ntfy every 15s, always (cheap: each poll asks
+	// only for messages newer than the last one seen). The first poll
+	// runs right away so the panel is filled before anyone looks.
+	go s.refreshNotify(ctx)
+	every(15*time.Second, func() { s.refreshNotify(ctx) })
+	// Relative times ("5 min ago") in the pushed fragment would go stale
+	// for new visitors; re-render once a minute (the hub drops it if the
+	// HTML did not change).
+	every(time.Minute, s.publishNotify)
+
 	// Housekeeping: drop expired sessions and stale rate-limit entries.
 	every(time.Hour, func() {
 		if n, err := s.sessions.PurgeExpired(); err == nil && n > 0 {
 			log.Printf("purged %d expired sessions", n)
 		}
 		s.limiter.Cleanup()
+		s.notifyLimit.Cleanup()
 	})
 }

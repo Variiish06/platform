@@ -46,3 +46,14 @@ apps:
     # Gitea has its own login, and git clients cannot do cookie logins.
     auth: false
     health: /api/healthz
+
+  - id: ntfy
+    name: ntfy
+    description: Notifications (pub/sub)
+    icon: cloud
+    upstream: 127.0.0.1:2586
+    # Not behind Portal login: the ntfy iPhone app and services publishing
+    # with tokens cannot do a cookie login. ntfy enforces its own auth
+    # (deny-all by default, users + tokens; see ntfy/server.yml, NOTIFY.md).
+    auth: false
+    health: /v1/health

@@ -1,0 +1,143 @@
+# ntfy server configuration (mounted read-only at /etc/ntfy/server.yml).
+#
+# ntfy is a "publish/subscribe" (pub/sub) server for notifications:
+#   - a PUBLISHER sends a message to a TOPIC (just a name, e.g. "backups")
+#     with an HTTP POST/PUT:   curl -d "Backup done" http://ntfy.exp.lab/backups
+#   - a SUBSCRIBER (the iPhone app, Portal's dashboard, a script) asks for a
+#     topic's messages, either by keeping a connection open (streaming) or by
+#     asking now and then ("poll").
+# Publishers and subscribers never know about each other; the topic name is
+# the only thing they share. That is what makes it easy to add a new service:
+# give it a token that may write one topic and it is done.
+#
+# Every setting below can also be given as an environment variable
+# (NTFY_ + upper-case name, dashes -> underscores). Secrets are passed that
+# way from .env (see compose.notify.yml), so this file can be committed.
+# Reference: https://docs.ntfy.sh/config/
+
+# ---------------------------------------------------------------------------
+# Where the server lives
+# ---------------------------------------------------------------------------
+
+# The URL people and phones use. ntfy puts it in links (attachments, the web
+# app) and the iPhone app uses it to work out which server a topic is on.
+# It must match what you type into the app exactly.
+base-url: "http://ntfy.exp.lab"
+
+# Inside the container ntfy listens on port 80. Docker publishes it ONLY on
+# 127.0.0.1:2586 of the host (compose.notify.yml); Caddy forwards
+# ntfy.exp.lab there. Other containers on the "platform_internal" network
+# reach it directly as http://ntfy:80.
+# (Port 80 works as a non-root user because Docker sets
+# net.ipv4.ip_unprivileged_port_start=0 inside containers.)
+listen-http: ":80"
+
+# Requests arrive through Caddy, so the TCP peer is always the proxy. With
+# this on, ntfy reads the real client address from X-Forwarded-For (the
+# right-most entry, which Caddy appends) for rate limiting and logs.
+behind-proxy: true
+
+# ---------------------------------------------------------------------------
+# Storage (all of it under ./data/ntfy on the host)
+# ---------------------------------------------------------------------------
+
+# Message cache: SQLite file holding recent messages so a phone that was
+# offline (or Portal's poller) can fetch what it missed with "?since=...".
+cache-file: "/var/lib/ntfy/cache.db"
+# Keep messages for 7 days (default is only 12h). A week covers "what
+# happened while I was travelling" and the file stays tiny (a few KB/day).
+cache-duration: "168h"
+
+# User database: users, password hashes (bcrypt), access rules and tokens.
+auth-file: "/var/lib/ntfy/auth.db"
+
+# ---------------------------------------------------------------------------
+# Access control
+# ---------------------------------------------------------------------------
+
+# Anything not explicitly allowed is forbidden. Anonymous visitors can
+# neither read nor write any topic. Without this, anyone on the tailnet who
+# guessed a topic name could read your backup and alert messages.
+auth-default-access: "deny-all"
+
+# Users, access rules and tokens are DECLARED rather than created by hand.
+# On every start ntfy makes auth.db match these lists (and removes declared
+# entries that disappeared). They contain secrets (password hashes, tokens),
+# so they are NOT written here: compose.notify.yml builds them from .env as
+# NTFY_AUTH_USERS / NTFY_AUTH_ACCESS / NTFY_AUTH_TOKENS. The formats are
+#   auth-users:  <user>:<bcrypt hash>:<admin|user>
+#   auth-access: <user>:<topic pattern>:<rw|ro|wo|deny>
+#   auth-tokens: <user>:<tk_ + 29 chars>[:<label>]
+# scripts/ntfy-provision.sh generates the values. See NOTIFY.md.
+
+# No self-service accounts: the user list is fixed (above).
+enable-signup: false
+# Allow logging in (web app at http://ntfy.exp.lab and the iPhone app use
+# username + password). Without it only tokens would work.
+enable-login: true
+# Topic reservations are a feature for public servers. Not needed here.
+enable-reservations: false
+
+# ---------------------------------------------------------------------------
+# iPhone push ("instant notifications" on iOS)
+# ---------------------------------------------------------------------------
+#
+# iOS does not let apps keep a connection open in the background, so the
+# ntfy iPhone app cannot simply listen to this server. Apple only delivers
+# pushes that come through its own service (APNs), and only the official
+# ntfy.sh server holds the APNs key for the ntfy app.
+#
+# With upstream-base-url set, for every message published here this server
+# sends a "poll request" to ntfy.sh: a POST to ntfy.sh/<topic hash> whose
+# only payload is the message ID (in the X-Poll-ID header). The topic name is
+# not sent either: the upstream topic is the SHA-256 hash of this server's
+# topic URL (e.g. of "http://ntfy.exp.lab/backups"). ntfy.sh forwards that
+# poll request via APNs to the phone; the phone wakes up and fetches the
+# real message (title, text, priority) DIRECTLY from http://ntfy.exp.lab over
+# Tailscale, with your login. So ntfy.sh learns "some message ID exists for
+# some hashed topic, at this time" - never the content.
+# Docs: https://docs.ntfy.sh/config/#ios-instant-notifications
+#
+# Without it, iPhone notifications still arrive, but only when iOS happens
+# to let the app refresh in the background: that can take hours.
+upstream-base-url: "https://ntfy.sh"
+
+# ---------------------------------------------------------------------------
+# Features that are switched off
+# ---------------------------------------------------------------------------
+
+# Attachments (files sent along with a message) stay OFF: they are enabled
+# only when "attachment-cache-dir" is set, and it is not. Messages here are
+# short texts; files would only fill the disk.
+#
+# Web Push (browser notifications) is OFF: it is enabled only when
+# "web-push-public-key"/"web-push-private-key" are set, and they are not.
+#
+# E-mail, phone calls and SMTP-in are off for the same reason (not set).
+
+# ---------------------------------------------------------------------------
+# Rate limits ("visitors")
+# ---------------------------------------------------------------------------
+#
+# ntfy limits each visitor (an IP address, or a logged-in user) with a
+# "token bucket": you may make `burst` requests at once, then one more per
+# `replenish` interval. Defaults (60 burst, 1 per 5s) are made for the
+# public ntfy.sh. Here every caller is one of our own services, and several
+# of them reach ntfy from the same Docker gateway address, so be generous:
+# an alert storm must not be dropped. Abuse is not a concern: nobody can
+# publish without a token.
+visitor-request-limit-burst: 200
+visitor-request-limit-replenish: "2s"
+# Messages per visitor per 24h. 0 = derived from the request limit above
+# (86400 s / 2 s = 43200), i.e. effectively unlimited for our purposes.
+visitor-message-daily-limit: 0
+# Open streaming connections per visitor (each phone topic subscription is
+# one). Six topics on a couple of devices fits easily.
+visitor-subscription-limit: 30
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+# "info" logs start-up and errors only. Use "debug" when diagnosing, never
+# "trace" for long: it logs message contents.
+log-level: "info"

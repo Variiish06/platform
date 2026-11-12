@@ -162,6 +162,28 @@ button { font: inherit; color: inherit; }
 .row.busy .icon-btn .ico { animation: spin .9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ---------- Notifications ---------- */
+.notes .note { display: grid; gap: 3px; padding: 12px 16px; border-left: 3px solid transparent; min-width: 0; }
+.notes .note + .note { border-top: 1px solid var(--line); }
+.note-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.chip {
+  flex: none; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  padding: 2px 8px; border-radius: 999px; background: rgba(94, 234, 212, .1); color: var(--accent);
+}
+.note-title { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note-time { margin-left: auto; flex: none; font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.note-msg { font-size: 14px; color: var(--dim); overflow-wrap: anywhere; white-space: pre-line;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.note-tags { font-size: 12px; color: var(--faint); font-family: var(--mono); }
+.note[data-prio="urgent"] { border-left-color: var(--bad); background: rgba(248, 113, 113, .06); }
+.note[data-prio="urgent"] .chip { background: rgba(248, 113, 113, .14); color: var(--bad); }
+.note[data-prio="urgent"] .note-title { color: #fecaca; }
+.note[data-prio="high"] { border-left-color: var(--warn); }
+.note[data-prio="quiet"], .note[data-prio="low"] { opacity: .6; }
+.count .warn { color: var(--warn); }
+.link { color: var(--dim); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; }
+@media (hover: hover) { .link:hover { color: var(--accent); } }
+
 /* ---------- Buttons ---------- */
 .icon-btn {
   width: 44px; height: 44px; border-radius: var(--r-md); border: 0; background: transparent; color: var(--dim);
@@ -252,7 +274,7 @@ button { font: inherit; color: inherit; }
 }
 @media (min-width: 1000px) {
   .page { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); column-gap: 32px; padding-top: 28px; align-items: start; }
-  #apps { grid-column: 1 / -1; }
+  #apps, #notify { grid-column: 1 / -1; }
   .tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .row { min-height: 56px; }

@@ -58,6 +58,17 @@ func hashToken(token string) string {
 
 // Create starts a session and returns the secret token for the cookie.
 func (s *SessionStore) Create(ip, userAgent string) (string, error) {
+	return s.CreateWithTTL(ip, userAgent, s.ttl)
+}
+
+// CreateWithTTL starts a session that lives at most ttl. With ttl shorter
+// than the normal sliding window the session is "fixed": use does not
+// extend it (see Validate), so a short-lived admin/test session made with
+// "portal sessions create --ttl 15m" really ends after 15 minutes.
+func (s *SessionStore) CreateWithTTL(ip, userAgent string, ttl time.Duration) (string, error) {
+	if ttl <= 0 || ttl > s.ttl {
+		return "", errors.New("session lifetime must be between 1s and the normal session lifetime")
+	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
@@ -69,7 +80,7 @@ func (s *SessionStore) Create(ip, userAgent string) (string, error) {
 	}
 	_, err := s.db.Exec(`INSERT INTO sessions(token_hash, created_at, last_seen, expires_at, ip, user_agent)
 		VALUES(?, ?, ?, ?, ?, ?)`,
-		hashToken(token), now.Unix(), now.Unix(), now.Add(s.ttl).Unix(), ip, userAgent)
+		hashToken(token), now.Unix(), now.Unix(), now.Add(ttl).Unix(), ip, userAgent)
 	if err != nil {
 		return "", err
 	}
@@ -105,7 +116,12 @@ func (s *SessionStore) Validate(token string) (Session, bool) {
 	sess.ExpiresAt = time.Unix(expires, 0)
 
 	// Sliding expiry: this request proves the session is still in use.
-	if now.Sub(sess.LastSeen) >= touchInterval {
+	// Only normal sessions slide. Their deadline is always exactly
+	// last_seen + ttl (Create and the update below both set it so); a
+	// session created with a shorter lifetime (CreateWithTTL) has less
+	// than that and keeps its fixed deadline.
+	sliding := sess.ExpiresAt.Sub(sess.LastSeen) >= s.ttl
+	if sliding && now.Sub(sess.LastSeen) >= touchInterval {
 		sess.LastSeen = now
 		sess.ExpiresAt = now.Add(s.ttl)
 		s.db.Exec(`UPDATE sessions SET last_seen = ?, expires_at = ? WHERE token_hash = ?`,

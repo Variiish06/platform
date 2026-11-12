@@ -2,7 +2,8 @@
 # Run a Portal admin command inside the running container.
 #   ./portalctl set-password
 #   ./portalctl totp enable | disable | status
-#   ./portalctl sessions [revoke]
+#   ./portalctl sessions [revoke [<cookie value>]]
+#   ./portalctl sessions create --ttl 15m --note test   (prints a cookie value)
 cd "$(dirname "$0")" || exit 1
 if [ -t 0 ]; then
     exec docker compose exec portal /portal "$@"

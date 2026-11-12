@@ -21,6 +21,7 @@ import (
 	"portal/internal/apps"
 	"portal/internal/auth"
 	"portal/internal/docker"
+	"portal/internal/notify"
 	"portal/internal/sysinfo"
 )
 
@@ -35,6 +36,8 @@ type Config struct {
 	DockerSock   string // unix socket of the docker-socket-proxy
 	User         string // display name of the single user
 	CookieSecure bool   // true once the site is served over HTTPS
+	NtfyURL      string // e.g. http://127.0.0.1:2586; empty disables notifications
+	NtfyToken    string // Portal's READ-ONLY ntfy token, used only for polling
 }
 
 // Scheme is the URL scheme browsers use to reach the site.
@@ -64,6 +67,12 @@ type Server struct {
 	hub      *Hub
 	metrics  *Metrics
 	tmpl     *template.Template
+
+	// Notifications. The poller holds Portal's read-only token; the
+	// publisher holds no token at all (callers bring their own).
+	notifyPoll  *notify.Poller
+	notifyPub   *notify.Publisher
+	notifyLimit *notify.RateLimiter
 	hostname string
 	version  string // cache-busting suffix for static files
 
@@ -100,6 +109,10 @@ func New(cfg Config, db *sql.DB) (*Server, error) {
 		tmpl:     tmpl,
 		hostname: host,
 		version:  strconv.FormatInt(time.Now().Unix(), 36),
+
+		notifyPoll:  notify.NewPoller(cfg.NtfyURL, cfg.NtfyToken),
+		notifyPub:   notify.NewPublisher(cfg.NtfyURL),
+		notifyLimit: notify.NewRateLimiter(60, time.Minute),
 	}, nil
 }
 
@@ -144,6 +157,10 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /logout", s.wrap("logout", s.handleLogout))
 	static, _ := fs.Sub(webFS, "web/static")
 	mux.Handle("GET /static/", s.wrap("static", cacheStatic(http.StripPrefix("/static/", http.FileServerFS(static))).ServeHTTP))
+
+	// For services, not browsers: no session, but an ntfy token is
+	// required and forwarded (see notify.go).
+	mux.Handle("POST /api/notify", s.wrap("notify", s.handleNotify))
 
 	// Called by Caddy for every request to an app hostname.
 	mux.Handle("GET /auth/verify", s.wrap("verify", s.handleVerify))

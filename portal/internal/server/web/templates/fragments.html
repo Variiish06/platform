@@ -1,4 +1,4 @@
-{{/* These three blocks are rendered twice: inside the full page on first
+{{/* These blocks are rendered twice: inside the full page on first
      load, and on their own whenever data changes, to be pushed to open
      dashboards over the event stream. One template, two uses. */}}
 
@@ -67,5 +67,36 @@
 </ul>
 {{else}}
 <p class="empty">No containers found.</p>
+{{end}}
+{{end}}
+
+{{/* Notifications. Message text comes from other services: html/template
+     escapes every value here, so it can never become markup. */}}
+{{define "notify"}}
+<div class="sec-head">
+  <h2>Notifications</h2>
+  <span class="count">{{if eq .State "off"}}off{{else if eq .State "down"}}<span class="warn">ntfy not reachable</span>{{else}}last {{len .Items}} · <a class="link" href="http://ntfy.exp.lab/">ntfy.exp.lab</a>{{end}}</span>
+</div>
+{{if eq .State "off"}}
+<p class="banner" role="status"><strong>ntfy not reachable.</strong> Notifications are not set up in Portal: {{.Error}}</p>
+{{else if eq .State "down"}}
+<p class="banner" role="alert"><strong>ntfy not reachable.</strong> {{.Error}}.{{if .Items}} Showing the last messages received.{{end}}</p>
+{{end}}
+{{if .Items}}
+<ul class="rows notes">
+  {{range .Items}}
+  <li class="note" data-prio="{{.Prio}}">
+    <span class="note-head">
+      <span class="chip">{{.Topic}}</span>
+      {{if .Title}}<span class="note-title">{{.Title}}</span>{{end}}
+      <time class="note-time" datetime="{{.ISO}}" data-ts="{{.TS}}" title="{{.At}}">{{.Ago}}</time>
+    </span>
+    <span class="note-msg" title="{{.Full}}">{{.Message}}</span>
+    {{if .Tags}}<span class="note-tags">{{.Tags}}</span>{{end}}
+  </li>
+  {{end}}
+</ul>
+{{else if eq .State "ok"}}
+<p class="empty">No notifications in the last 7 days. Send one: see <span class="mono">NOTIFY.md</span>.</p>
 {{end}}
 {{end}}

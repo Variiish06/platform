@@ -2,6 +2,11 @@
 # and a locked-down proxy in front of the Docker socket.
 name: platform
 
+# More services, each in its own file, merged into this same project
+# ("platform"): they share .env and appear in "docker compose ps".
+include:
+  - compose.notify.yml          # Phase A: ntfy notification hub
+
 x-defaults: &defaults
   restart: unless-stopped
   logging:
@@ -59,6 +64,10 @@ services:
       PORTAL_DOCKER_SOCK: /run/docker-proxy/docker.sock
       TZ: ${TZ:-UTC}
       GOMEMLIMIT: 64MiB
+      # Notifications panel: Portal polls ntfy with a READ-ONLY token.
+      # Empty or unreachable is fine: the panel says "ntfy not reachable".
+      PORTAL_NTFY_URL: http://127.0.0.1:2586
+      PORTAL_NTFY_TOKEN: ${NTFY_TOKEN_PORTAL:-}
     volumes:
       - ./data:/data                    # portal.db + apps.yaml (back this up)
       - ./run:/run/docker-proxy         # the proxy's socket, NOT the real Docker socket
