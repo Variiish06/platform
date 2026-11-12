@@ -71,6 +71,7 @@ type Server struct {
 	// the HTTP handlers (readers).
 	mu           sync.RWMutex
 	lastSys      sysinfo.Snapshot
+	cpuHist      []float64
 	containers   []docker.Container
 	containersAt time.Time
 	dockerErr    string

@@ -139,7 +139,8 @@
   });
 
   applyBars(document);
-  const cpu = $('.stat[data-key="cpu"] [data-pct]');
-  if (cpu) drawSpark(parseFloat(cpu.dataset.pct) || 0);
+  // Seed the sparkline with the history the server put in the page.
+  const spark = $('.spark');
+  if (spark && spark.dataset.hist) spark.dataset.hist.split(',').forEach(function (v) { drawSpark(parseFloat(v) || 0); });
   connect();
 })();

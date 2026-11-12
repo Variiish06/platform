@@ -27,6 +27,9 @@ type statView struct {
 	Sub   string  `json:"s"`
 	Pct   float64 `json:"p"`  // bar fill 0..100, or -1 for "no bar"
 	State string  `json:"st"` // "", "warn" or "bad"
+	// Hist is the recent CPU history ("3.1,4.0,..."), only set on the CPU
+	// cell of a full page load so the sparkline is not empty at first.
+	Hist string `json:"-"`
 }
 
 type appView struct {
@@ -223,9 +226,17 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if stale {
 		s.refreshContainers(r.Context())
 	}
+	stats := buildStats(sys)
+	s.mu.RLock()
+	hist := make([]string, len(s.cpuHist))
+	for i, v := range s.cpuHist {
+		hist[i] = fmt.Sprintf("%.1f", v)
+	}
+	s.mu.RUnlock()
+	stats[0].Hist = strings.Join(hist, ",") // stats[0] is the CPU cell
 	s.render(w, http.StatusOK, "dashboard.html", dashboardPage{
 		V: s.version, Host: s.hostname, User: s.cfg.User,
-		Stats: buildStats(sys), Apps: s.appsView(), Containers: s.containersView(),
+		Stats: stats, Apps: s.appsView(), Containers: s.containersView(),
 	})
 }
 
@@ -360,6 +371,11 @@ func (s *Server) sampleSystem() {
 	snap := s.sys.Snapshot()
 	s.mu.Lock()
 	s.lastSys = snap
+	// Keep the last 60 readings for the sparkline.
+	s.cpuHist = append(s.cpuHist, snap.CPUPercent)
+	if len(s.cpuHist) > 60 {
+		s.cpuHist = s.cpuHist[len(s.cpuHist)-60:]
+	}
 	s.mu.Unlock()
 }
 

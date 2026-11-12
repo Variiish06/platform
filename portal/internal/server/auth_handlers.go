@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -130,6 +131,9 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	ok := false
 	if password != "" && len(password) <= 1024 {
 		ok, err = auth.VerifyPassword(password, hash)
+		// Argon2 just used ~19 MiB. Go would hand it back to the OS
+		// eventually; do it now so the container's RAM stays low.
+		go debug.FreeOSMemory()
 		if err != nil {
 			log.Printf("login: stored password hash is unreadable: %v", err)
 		}

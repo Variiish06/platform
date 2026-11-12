@@ -35,7 +35,7 @@
   <span class="stat-label">{{.Label}}</span>
   <span class="stat-value" data-f="v">{{.Value}}</span>
   <span class="stat-sub" data-f="s">{{.Sub}}</span>
-  {{if eq .Key "cpu"}}<svg class="spark" viewBox="0 0 120 36" preserveAspectRatio="none" aria-hidden="true"><polyline points=""/></svg>{{end}}
+  {{if eq .Key "cpu"}}<svg class="spark" viewBox="0 0 120 36" preserveAspectRatio="none" aria-hidden="true" data-hist="{{.Hist}}"><polyline points=""/></svg>{{end}}
   <span class="bar{{if lt .Pct 0.0}} none{{end}}"><i data-pct="{{printf "%.1f" .Pct}}"></i></span>
 </div>
 {{end}}
