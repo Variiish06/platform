@@ -1,4 +1,4 @@
-# Phase 1: plain routing, no auth yet.
+# Phase 2: dashboard host goes to Portal; apps are still routed directly.
 {
     auto_https off
     admin off
@@ -18,9 +18,8 @@ http://bot.{$DOMAIN} {
     reverse_proxy 127.0.0.1:8080
 }
 http://{$DOMAIN} {
-    respond "portal coming soon" 200
+    reverse_proxy 127.0.0.1:7080
 }
-# Any other Host header.
 http:// {
     respond "unknown host" 404
 }

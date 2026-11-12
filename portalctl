@@ -1,0 +1,11 @@
+#!/bin/sh
+# Run a Portal admin command inside the running container.
+#   ./portalctl set-password
+#   ./portalctl totp enable | disable | status
+#   ./portalctl sessions [revoke]
+cd "$(dirname "$0")" || exit 1
+if [ -t 0 ]; then
+    exec docker compose exec portal /portal "$@"
+else
+    exec docker compose exec -T portal /portal "$@"   # input is piped: no TTY
+fi

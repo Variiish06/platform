@@ -1,0 +1,321 @@
+// Package server is Portal's HTTP layer: the forward-auth endpoint that
+// Caddy consults, the login pages, the dashboard and its live updates.
+package server
+
+import (
+	"context"
+	"database/sql"
+	"embed"
+	"html/template"
+	"io/fs"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"portal/internal/apps"
+	"portal/internal/auth"
+	"portal/internal/docker"
+	"portal/internal/sysinfo"
+)
+
+//go:embed web
+var webFS embed.FS
+
+// Config is everything the server needs from its environment.
+type Config struct {
+	Listen       string // address to listen on, loopback only: Caddy is the front door
+	Domain       string // e.g. "exp.lab"
+	DataDir      string // holds portal.db and apps.yaml
+	DockerSock   string // unix socket of the docker-socket-proxy
+	User         string // display name of the single user
+	CookieSecure bool   // true once the site is served over HTTPS
+}
+
+// Scheme is the URL scheme browsers use to reach the site.
+func (c Config) Scheme() string {
+	if c.CookieSecure {
+		return "https"
+	}
+	return "http"
+}
+
+// BaseURL is the dashboard's origin, e.g. "http://exp.lab".
+func (c Config) BaseURL() string { return c.Scheme() + "://" + c.Domain }
+
+// cookieName is the session cookie. Caddy strips it from requests before
+// they reach the apps (see Caddyfile), so only Portal ever reads it.
+const cookieName = "portal_session"
+
+// Server ties the pieces together.
+type Server struct {
+	cfg      Config
+	db       *sql.DB
+	sessions *auth.SessionStore
+	limiter  *auth.Limiter
+	apps     *apps.Registry
+	sys      *sysinfo.Collector
+	docker   *docker.Client
+	hub      *Hub
+	metrics  *Metrics
+	tmpl     *template.Template
+	hostname string
+	version  string // cache-busting suffix for static files
+
+	// Latest readings, shared between the background loops (writers) and
+	// the HTTP handlers (readers).
+	mu           sync.RWMutex
+	lastSys      sysinfo.Snapshot
+	containers   []docker.Container
+	containersAt time.Time
+	dockerErr    string
+}
+
+// New builds a server. It does not start listening.
+func New(cfg Config, db *sql.DB) (*Server, error) {
+	reg, err := apps.NewRegistry(filepath.Join(cfg.DataDir, "apps.yaml"), cfg.Domain)
+	if err != nil {
+		return nil, err
+	}
+	tmpl, err := template.New("").Funcs(template.FuncMap{"icon": iconID}).ParseFS(webFS, "web/templates/*.html")
+	if err != nil {
+		return nil, err
+	}
+	host, _ := os.Hostname()
+	return &Server{
+		cfg: cfg, db: db,
+		sessions: auth.NewSessionStore(db),
+		limiter:  auth.NewLimiter(),
+		apps:     reg,
+		sys:      sysinfo.New(cfg.DataDir),
+		docker:   docker.New(cfg.DockerSock),
+		hub:      NewHub(),
+		metrics:  NewMetrics(),
+		tmpl:     tmpl,
+		hostname: host,
+		version:  strconv.FormatInt(time.Now().Unix(), 36),
+	}, nil
+}
+
+// Run serves HTTP until ctx is cancelled, then shuts down cleanly.
+func (s *Server) Run(ctx context.Context) error {
+	s.startBackground(ctx)
+
+	srv := &http.Server{
+		Addr:              s.cfg.Listen,
+		Handler:           s.routes(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		// No WriteTimeout: the /events stream stays open for hours. That
+		// handler sets its own deadline before every write instead.
+		MaxHeaderBytes: 32 << 10,
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServe() }()
+	log.Printf("portal listening on %s for %s", s.cfg.Listen, s.cfg.BaseURL())
+
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+		s.hub.CloseAll() // end open event streams so Shutdown can finish
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutCtx)
+	}
+}
+
+// routes is the complete URL map. Go 1.22+ patterns include the method,
+// so a POST to a GET-only path is answered with 405 automatically.
+func (s *Server) routes() http.Handler {
+	mux := http.NewServeMux()
+
+	// Open endpoints.
+	mux.Handle("GET /healthz", s.wrap("healthz", s.handleHealthz))
+	mux.Handle("GET /login", s.wrap("login", s.handleLoginPage))
+	mux.Handle("POST /login", s.wrap("login", s.handleLoginSubmit))
+	mux.Handle("POST /logout", s.wrap("logout", s.handleLogout))
+	static, _ := fs.Sub(webFS, "web/static")
+	mux.Handle("GET /static/", s.wrap("static", cacheStatic(http.StripPrefix("/static/", http.FileServerFS(static))).ServeHTTP))
+
+	// Called by Caddy for every request to an app hostname.
+	mux.Handle("GET /auth/verify", s.wrap("verify", s.handleVerify))
+
+	// Session required.
+	mux.Handle("GET /{$}", s.wrap("dashboard", s.handleDashboard))
+	mux.Handle("GET /events", s.wrap("events", s.handleEvents))
+	mux.Handle("GET /api/session", s.wrap("session", s.handleSessionProbe))
+	mux.Handle("POST /api/containers/{id}/restart", s.wrap("restart", s.handleRestart))
+	mux.Handle("GET /metrics", s.wrap("metrics", s.handleMetrics))
+	return mux
+}
+
+// statusRecorder remembers the status code a handler wrote, for metrics.
+type statusRecorder struct {
+	http.ResponseWriter
+	code int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.code = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// Unwrap lets http.ResponseController reach the real writer, which the
+// event stream needs in order to flush.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// wrap is the middleware around every handler: security headers, panic
+// recovery and request counting.
+func (s *Server) wrap(name string, h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hd := w.Header()
+		// Content-Security-Policy: the page may only load scripts and
+		// styles from this origin. Injected <script> tags or inline
+		// handlers will not run, which blunts cross-site scripting.
+		hd.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		hd.Set("X-Content-Type-Options", "nosniff")
+		hd.Set("Referrer-Policy", "same-origin")
+		hd.Set("X-Frame-Options", "DENY")
+
+		rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
+		defer func() {
+			if p := recover(); p != nil {
+				log.Printf("panic in %s: %v", name, p)
+				http.Error(rec, "internal error", http.StatusInternalServerError)
+			}
+			s.metrics.Request(name, rec.code)
+		}()
+		h(rec, r)
+	})
+}
+
+func cacheStatic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Safe to cache for long: every URL carries ?v=<start time>, so a
+		// new deploy changes the URL.
+		w.Header().Set("Cache-Control", "public, max-age=604800")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// sessionToken returns the cookie value if it belongs to a live session.
+func (s *Server) sessionToken(r *http.Request) (string, bool) {
+	c, err := r.Cookie(cookieName)
+	if err != nil {
+		return "", false
+	}
+	if _, ok := s.sessions.Validate(c.Value); !ok {
+		return "", false
+	}
+	return c.Value, true
+}
+
+// setSessionCookie writes (or with value "" clears) the session cookie.
+func (s *Server) setSessionCookie(w http.ResponseWriter, value string) {
+	c := &http.Cookie{
+		Name:  cookieName,
+		Value: value,
+		// Domain makes the browser send the cookie to exp.lab AND every
+		// subdomain. Without it, the cookie would be "host-only" and
+		// focal.exp.lab would never see it: no single sign-on.
+		Domain: s.cfg.Domain,
+		Path:   "/",
+		// HttpOnly: JavaScript cannot read it, so a script-injection bug
+		// in any app cannot steal the session.
+		HttpOnly: true,
+		// Lax: sent on top-level navigation (clicking a link to an app)
+		// but not on requests fired by other sites' pages.
+		SameSite: http.SameSiteLaxMode,
+		Secure:   s.cfg.CookieSecure,
+		// The browser keeps the cookie for 400 days (the most browsers
+		// allow). The real limit is server-side: the 30-day sliding
+		// expiry in the sessions table.
+		MaxAge: 400 * 24 * 3600,
+	}
+	if value == "" {
+		c.MaxAge = -1 // delete now
+	}
+	http.SetCookie(w, c)
+}
+
+// sameOrigin guards state-changing requests against cross-site request
+// forgery. SameSite=Lax already stops other *sites*, but focal.exp.lab
+// and exp.lab count as the same site, so a compromised app could still
+// post to the dashboard. Browsers always send Origin on POST and pages
+// cannot fake it; requiring it to be exactly our origin closes that gap.
+func (s *Server) sameOrigin(r *http.Request) bool {
+	return r.Header.Get("Origin") == s.cfg.BaseURL()
+}
+
+// clientIP returns the address of the browser. Portal only listens on
+// loopback, so the TCP peer is always Caddy; Caddy appends the real
+// client address as the last entry of X-Forwarded-For (and discards
+// whatever the client sent in that header itself).
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[len(parts)-1])
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	// Healthy means "can answer HTTP and reach the database".
+	if err := s.db.PingContext(r.Context()); err != nil {
+		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write([]byte("ok\n"))
+}
+
+// render executes a named template into a buffer first, so a template
+// error produces a clean 500 instead of half a page.
+func (s *Server) render(w http.ResponseWriter, status int, name string, data any) {
+	var buf strings.Builder
+	if err := s.tmpl.ExecuteTemplate(&buf, name, data); err != nil {
+		log.Printf("template %s: %v", name, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	w.Write([]byte(buf.String()))
+}
+
+// fragment renders a template to a string (for the event stream).
+func (s *Server) fragment(name string, data any) string {
+	var buf strings.Builder
+	if err := s.tmpl.ExecuteTemplate(&buf, name, data); err != nil {
+		log.Printf("template %s: %v", name, err)
+	}
+	return buf.String()
+}
+
+// knownIcons are the symbols defined in web/templates/icons.html.
+var knownIcons = map[string]bool{
+	"timer": true, "check": true, "git": true, "bot": true, "globe": true, "server": true,
+	"database": true, "chart": true, "book": true, "home": true, "code": true, "box": true,
+	"film": true, "music": true, "cloud": true, "wallet": true,
+}
+
+// iconID maps an apps.yaml icon name to a sprite id, with a fallback so
+// a typo shows a generic icon rather than nothing.
+func iconID(name string) string {
+	if knownIcons[name] {
+		return "i-" + name
+	}
+	return "i-box"
+}

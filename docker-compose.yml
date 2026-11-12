@@ -1,4 +1,5 @@
-# Platform stack: private DNS + reverse proxy (+ Portal, added in later phases).
+# Platform stack: private DNS, reverse proxy, Portal (login + dashboard)
+# and a locked-down proxy in front of the Docker socket.
 name: platform
 
 x-defaults: &defaults
@@ -39,3 +40,56 @@ services:
     cap_drop: [ALL]
     cap_add: [NET_BIND_SERVICE]
     mem_limit: 64m
+
+  portal:
+    <<: *defaults
+    build: ./portal
+    image: platform-portal:latest
+    # Host network, for two reasons: Portal health-checks apps on
+    # 127.0.0.1, and /proc/net/wireless (WiFi signal) is only the host's
+    # when the network namespace is shared. It listens on loopback only.
+    network_mode: host
+    user: "${PUID}:${PGID}"
+    environment:
+      PORTAL_LISTEN: 127.0.0.1:7080
+      PORTAL_DOMAIN: ${DOMAIN}
+      PORTAL_USER: ${PORTAL_USER:-admin}
+      PORTAL_COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      PORTAL_DATA: /data
+      PORTAL_DOCKER_SOCK: /run/docker-proxy/docker.sock
+      GOMEMLIMIT: 64MiB
+    volumes:
+      - ./data:/data                    # portal.db + apps.yaml (back this up)
+      - ./run:/run/docker-proxy         # the proxy's socket, NOT the real Docker socket
+    depends_on: [docker-proxy]
+    healthcheck:
+      test: ["CMD", "/portal", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 96m
+
+  # The only container that touches /var/run/docker.sock. It re-exports
+  # it as ./run/docker.sock and forwards nothing but the requests matched
+  # below: list and stats (GET) and restart (POST). Inspect, create, exec,
+  # delete, images, volumes... are all refused with 403.
+  docker-proxy:
+    <<: *defaults
+    image: wollomatic/socket-proxy:1
+    command:
+      - -loglevel=WARN
+      - -proxysocketendpoint=/run/docker-proxy/docker.sock
+      - -allowGET=/v1\.[0-9]+/containers/(json|[a-zA-Z0-9_.-]+/stats)
+      - -allowPOST=/v1\.[0-9]+/containers/[a-zA-Z0-9_.-]+/restart
+    network_mode: none                  # no network at all: reachable only via the socket file
+    user: "${PUID}:${DOCKER_GID}"       # docker group, so it may open the real socket
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./run:/run/docker-proxy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 24m

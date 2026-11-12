@@ -1,6 +1,8 @@
 # Secrets and machine-specific settings
 .env
-# Runtime state (SQLite, sockets). apps.yaml in data/ IS committed.
+# Runtime state. data/apps.yaml IS committed; the database is not.
 data/*.db
 data/*.db-*
-run/
+# The docker-socket-proxy's unix socket lives here.
+run/*
+!run/.gitkeep

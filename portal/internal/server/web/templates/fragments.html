@@ -1,0 +1,71 @@
+{{/* These three blocks are rendered twice: inside the full page on first
+     load, and on their own whenever data changes, to be pushed to open
+     dashboards over the event stream. One template, two uses. */}}
+
+{{define "apps"}}
+<div class="sec-head">
+  <h2>Apps</h2>
+  <span class="count{{if lt .Up .Total}} warn{{end}}">{{.Up}} of {{.Total}} up</span>
+</div>
+{{if .ConfigError}}<p class="banner" role="alert"><strong>apps.yaml has an error, so the last good version is still in use.</strong> {{.ConfigError}}</p>{{end}}
+{{if .Tiles}}
+<div class="tiles">
+  {{range .Tiles}}
+  <a class="tile" href="{{.URL}}" data-state="{{.State}}">
+    <span class="tile-top">
+      <span class="tile-ico"><svg class="ico"><use href="#{{icon .Icon}}"/></svg></span>
+      <svg class="ico tile-go"><use href="#i-arrow"/></svg>
+    </span>
+    <span class="tile-name">{{.Name}}</span>
+    <span class="tile-desc">{{if .Desc}}{{.Desc}}{{else}}{{.Host}}{{end}}</span>
+    <span class="tile-foot">
+      <span class="status" data-state="{{.State}}"><i class="dot"></i>{{.Detail}}</span>
+    </span>
+  </a>
+  {{end}}
+</div>
+{{else}}
+<p class="empty">No apps yet. Add one to <span class="mono">data/apps.yaml</span> and it appears here within 30 seconds.</p>
+{{end}}
+{{end}}
+
+{{define "stats"}}
+{{range .}}
+<div class="stat" data-key="{{.Key}}" data-state="{{.State}}">
+  <span class="stat-label">{{.Label}}</span>
+  <span class="stat-value" data-f="v">{{.Value}}</span>
+  <span class="stat-sub" data-f="s">{{.Sub}}</span>
+  {{if eq .Key "cpu"}}<svg class="spark" viewBox="0 0 120 36" preserveAspectRatio="none" aria-hidden="true"><polyline points=""/></svg>{{end}}
+  <span class="bar{{if lt .Pct 0.0}} none{{end}}"><i data-pct="{{printf "%.1f" .Pct}}"></i></span>
+</div>
+{{end}}
+{{end}}
+
+{{define "containers"}}
+<div class="sec-head">
+  <h2>Containers</h2>
+  <span class="count">{{.Running}} of {{.Total}} running</span>
+</div>
+{{if .Error}}
+<p class="banner" role="alert">{{.Error}}</p>
+{{else if .Rows}}
+<ul class="rows">
+  {{range .Rows}}
+  <li class="row" data-id="{{.ID}}" data-state="{{.State}}">
+    <i class="dot" data-state="{{if .Running}}up{{else}}off{{end}}"></i>
+    <span class="row-main">
+      <span class="row-name">{{.Name}}</span>
+      <span class="row-status">{{.Status}}</span>
+    </span>
+    <span class="row-mem">{{.Mem}}</span>
+    <button class="icon-btn" type="button" data-restart="{{.ID}}" data-name="{{.Name}}" data-running="{{.Running}}"
+            aria-label="{{if .Running}}Restart{{else}}Start{{end}} {{.Name}}" title="{{if .Running}}Restart{{else}}Start{{end}}">
+      <svg class="ico"><use href="#{{if .Running}}i-restart{{else}}i-play{{end}}"/></svg>
+    </button>
+  </li>
+  {{end}}
+</ul>
+{{else}}
+<p class="empty">No containers found.</p>
+{{end}}
+{{end}}

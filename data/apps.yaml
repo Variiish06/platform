@@ -1,0 +1,48 @@
+# Every app behind the proxy. One entry here does everything:
+#   - routes  http://<id>.exp.lab  to the app   (Caddy asks Portal where to send it)
+#   - puts Portal's login in front of it        (unless auth: false)
+#   - adds a tile to the dashboard
+#   - health-checks it every 30 seconds
+#
+# Portal re-reads this file within 30 seconds of a change. No restart needed.
+# If the file has a mistake, the previous version stays active and the
+# dashboard shows the error.
+#
+# Fields:
+#   id           hostname label (lowercase letters, digits, dashes)
+#   name         title on the tile
+#   description  one short line under the title (optional)
+#   icon         timer, check, git, bot, globe, server, database, chart, book,
+#                home, code, film, music, cloud, wallet, box (optional)
+#   upstream     host:port where the app really listens. Portal and Caddy run
+#                on the host network, so 127.0.0.1 is the server itself.
+#   auth         true (default): Portal login required. false: no Portal login.
+#   health       path to probe (default "/"). Any answer below HTTP 500 is "up".
+
+apps:
+  - id: focal
+    name: Focal
+    description: Pomodoro timer
+    icon: timer
+    upstream: 127.0.0.1:8787
+
+  - id: ritual
+    name: Ritual
+    description: Habits and to-dos
+    icon: check
+    upstream: 127.0.0.1:8090
+
+  - id: bot
+    name: Bots
+    description: Groq bot team
+    icon: bot
+    upstream: 127.0.0.1:8080
+
+  - id: git
+    name: Gitea
+    description: Git hosting
+    icon: git
+    upstream: 127.0.0.1:3000
+    # Gitea has its own login, and git clients cannot do cookie logins.
+    auth: false
+    health: /api/healthz

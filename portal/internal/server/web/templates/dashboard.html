@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{template "head" .}}
+<title>exp.lab</title>
+<script src="/static/app.js?v={{.V}}" defer></script>
+</head>
+<body>
+{{template "icons"}}
+<header class="top">
+  <div class="top-in">
+    {{template "brand"}}
+    <span class="host mono">{{.Host}}</span>
+    <span class="live" id="live" data-state="connecting" role="status"><i class="dot"></i><span id="live-text">Connecting</span></span>
+    <form method="post" action="/logout">
+      <button class="icon-btn" type="submit" aria-label="Sign out" title="Sign out"><svg class="ico"><use href="#i-logout"/></svg></button>
+    </form>
+  </div>
+</header>
+
+<main class="page">
+  <section class="sec" id="apps" aria-label="Apps">{{template "apps" .Apps}}</section>
+
+  <section class="sec" aria-label="System">
+    <div class="sec-head"><h2>System</h2><span class="count mono">{{.Host}}</span></div>
+    <div class="stats" id="stats">{{template "stats" .Stats}}</div>
+  </section>
+
+  <section class="sec" id="containers" aria-label="Containers">{{template "containers" .Containers}}</section>
+</main>
+
+<dialog id="confirm" class="dialog" aria-labelledby="confirm-title">
+  <form method="dialog">
+    <h3 id="confirm-title">Restart container?</h3>
+    <p id="confirm-text"></p>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" type="submit">Cancel</button>
+      <button class="btn primary" value="ok" type="submit" id="confirm-ok">Restart</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
