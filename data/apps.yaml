@@ -57,3 +57,18 @@ apps:
     # (deny-all by default, users + tokens; see ntfy/server.yml, NOTIFY.md).
     auth: false
     health: /v1/health
+
+  # Phase B monitoring UIs. Both behind Portal login (default auth).
+  - id: vm
+    name: VictoriaMetrics
+    description: Metrics DB; query UI at /vmui, alert rules at /vmalert
+    icon: chart
+    upstream: 127.0.0.1:8428
+    health: /health
+
+  - id: alerts
+    name: Alertmanager
+    description: Active alerts and silences
+    icon: server
+    upstream: 127.0.0.1:9093
+    health: /-/healthy

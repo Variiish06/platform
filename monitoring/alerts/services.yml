@@ -1,0 +1,99 @@
+# Alert rules: apps, containers and scrape targets.
+# vmalert loads every *.yml in this folder (compose.monitoring.yml: -rule=).
+# Format: Prometheus alerting rules. Check a change before reloading:
+#   scripts/monitoring-check.sh
+#
+# HOW A RULE WORKS
+#   Every 30 s (-evaluationInterval) vmalert runs `expr` (a PromQL/MetricsQL
+#   query) against VictoriaMetrics. Every series the query returns is one
+#   alert "instance", identified by its labels (e.g. name="focal").
+#     - first returned        -> state PENDING (nothing is sent yet)
+#     - still returned after `for:` -> FIRING, sent to Alertmanager
+#     - no longer returned    -> resolved (Alertmanager sends "Resolved")
+#   `for:` is the "is it really broken, or just a blip?" filter: a container
+#   restarting for 10 s, or one bad scrape, never reaches your phone.
+#
+# LABELS AND ANNOTATIONS
+#   labels.severity  "urgent" (ntfy priority 5, wakes you) or "normal"
+#                    (priority 3). Alertmanager routes on it
+#                    (monitoring/alertmanager.yml).
+#   annotations      text for humans. Go templates: {{ $labels.name }},
+#                    {{ $value }} (the number the expr returned).
+#     subject        short name of the broken thing; goes in the phone
+#                    title "🔥 ContainerDown: focal" (ntfy/templates/).
+#     summary        one line.  description: what it means / what to check.
+
+groups:
+  - name: services
+    rules:
+      # ------------------------------------------------------------------
+      # A container that was running recently has stopped.
+      # Portal exports portal_container_up{name} for every container in
+      # `docker ps -a`: 1 running, 0 anything else (exited, restarting...).
+      #
+      # The second half (`and on(name) max_over_time(...[24h]) == 1`) keeps
+      # only containers that were up at least once in the last 24 hours.
+      # Containers that have been stopped for ages (the groqbots-* bots,
+      # exec-engine) never nag. Side effect, on purpose: if something stays
+      # down for more than 24 h the alert resolves itself ("it is now
+      # considered permanently stopped"); the first alert already told you.
+      # A container that is deleted (docker rm) disappears from the list and
+      # cannot alert at all.
+      # ------------------------------------------------------------------
+      - alert: ContainerDown
+        expr: |
+          (portal_container_up == 0)
+            and on(name)
+          (max_over_time(portal_container_up[24h]) == 1)
+        for: 2m
+        labels:
+          severity: urgent
+        annotations:
+          subject: "{{ $labels.name }}"
+          summary: "Container {{ $labels.name }} is not running"
+          description: >-
+            {{ $labels.name }} has been stopped for over 2 minutes (it was
+            running within the last 24 h). Check: docker ps -a; docker logs
+            --tail 50 {{ $labels.name }}
+
+      # ------------------------------------------------------------------
+      # An app in data/apps.yaml stopped answering Portal's health check
+      # (portal_app_up{app}: 1 = HTTP answer below 500 within the timeout).
+      # Same 24 h rule: apps that are permanently off (the "bot" tile) stay
+      # quiet.
+      # ------------------------------------------------------------------
+      - alert: AppDown
+        expr: |
+          (portal_app_up == 0)
+            and on(app)
+          (max_over_time(portal_app_up[24h]) == 1)
+        for: 2m
+        labels:
+          severity: urgent
+        annotations:
+          subject: "{{ $labels.app }}"
+          summary: "App {{ $labels.app }} is not answering"
+          description: >-
+            http://{{ $labels.app }}.exp.lab has failed Portal's health check
+            for over 2 minutes. Its container may be down, or it hangs.
+
+      # ------------------------------------------------------------------
+      # VictoriaMetrics could not scrape Portal or node_exporter.
+      # `up` is written by the scraper itself for every target (see
+      # monitoring/scrape.yml). Without these two targets most other rules
+      # go blind (their series vanish -> no alert), so this one matters.
+      # (PLAN-2 calls these PortalDown / NodeExporterDown; one rule with the
+      # job label covers both.)
+      # ------------------------------------------------------------------
+      - alert: TargetDown
+        expr: up{job=~"portal|node"} == 0
+        for: 2m
+        labels:
+          severity: urgent
+        annotations:
+          subject: "{{ $labels.job }}"
+          summary: "Cannot scrape {{ $labels.job }} ({{ $labels.instance }})"
+          description: >-
+            Metrics from {{ $labels.job }} at {{ $labels.instance }} have
+            been missing for over 2 minutes, so alerts that depend on them
+            are blind. Check: docker compose ps (in ~/platform).

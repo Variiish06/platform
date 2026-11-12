@@ -1,0 +1,63 @@
+# What VictoriaMetrics collects ("scrapes"), and how often.
+# Same format as Prometheus' prometheus.yml (scrape_configs part).
+#
+# PULL MODEL
+#   Programs do not send their numbers anywhere. Each one exposes a plain-text
+#   page (usually /metrics) that lists its current values, e.g.
+#       node_memory_MemAvailable_bytes 4.1e+09
+#       portal_app_up{app="focal"} 1
+#   Every scrape_interval VictoriaMetrics fetches that page (a "scrape") and
+#   stores each number with the time it was read. Repeating that forever gives
+#   a TIME SERIES: one name + one set of labels -> a list of (time, value).
+#   Why pull and not push? The collector decides the pace, a dead target is
+#   noticed immediately (the scrape fails -> up == 0), and the programs stay
+#   simple: they only answer "what are your numbers right now?".
+#
+# WORDS
+#   target  one address to scrape, e.g. 127.0.0.1:9101
+#   job     a named group of targets of the same kind ("node", "portal").
+#           Every series scraped from it gets the label job="<name>".
+#   label   a key="value" pair that tells series apart: the same metric
+#           name with different labels is a different series
+#           (portal_app_up{app="focal"} vs portal_app_up{app="git"}).
+#           Each target also adds instance="<host:port>".
+#   up      a series VictoriaMetrics writes itself for every target:
+#           1 = last scrape worked, 0 = it failed. Alerts use it
+#           (monitoring/alerts/platform.yml, TargetDown).
+#
+# Every label combination is a new series that costs RAM and disk, so never
+# put unbounded values (user IDs, timestamps, URLs) in labels.
+
+global:
+  # 30 s: fine enough to see a spike, coarse enough to keep ~3k series at
+  # a few MB per month. Alert rules are evaluated at the same pace.
+  scrape_interval: 30s
+  scrape_timeout: 10s
+
+scrape_configs:
+  # The machine itself: CPU, memory, disks, network, temperatures, battery.
+  # node_exporter (compose.monitoring.yml) listens on 9101 because another
+  # app already owns the usual 9100.
+  - job_name: node
+    static_configs:
+      - targets: ["127.0.0.1:9101"]
+
+  # Portal: app health (portal_app_up), response times, logins, and the
+  # container list (portal_container_up/cpu/memory). /metrics is open only
+  # to direct loopback requests; through Caddy it needs a login.
+  - job_name: portal
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:7080"]
+
+  # The monitoring stack watching itself (memory use, rule evaluation
+  # errors, failed notifications).
+  - job_name: victoriametrics
+    static_configs:
+      - targets: ["127.0.0.1:8428"]
+  - job_name: vmalert
+    static_configs:
+      - targets: ["127.0.0.1:8880"]
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["127.0.0.1:9093"]

@@ -116,6 +116,20 @@ upstream-base-url: "https://ntfy.sh"
 # E-mail, phone calls and SMTP-in are off for the same reason (not set).
 
 # ---------------------------------------------------------------------------
+# Message templates (Phase B: Alertmanager -> ntfy)
+# ---------------------------------------------------------------------------
+#
+# Some senders (Alertmanager, Grafana, GitHub) can only POST their own JSON
+# ("webhook"). With "?template=<name>" in the URL, ntfy reads
+# <template-dir>/<name>.yml and renders its title/message/priority Go
+# templates from that JSON. Ours: ntfy/templates/alert-urgent.yml and
+# alert-normal.yml (mounted read-only by compose.notify.yml), used by
+# monitoring/alertmanager.yml. Files must end in .yml (not .yaml).
+# /etc/ntfy/templates is also ntfy's default; it is spelled out here so the
+# link between this file and the mount is visible.
+template-dir: "/etc/ntfy/templates"
+
+# ---------------------------------------------------------------------------
 # Rate limits ("visitors")
 # ---------------------------------------------------------------------------
 #

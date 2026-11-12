@@ -1,0 +1,123 @@
+# Alert rules: the machine itself (memory, disk, temperature, power).
+# Metrics come from node_exporter (job="node"). How rules work: see the top
+# of services.yml.
+#
+# FLAPPING
+#   A value that hovers around a threshold (disk at 84.9 / 85.1 %) would
+#   fire, resolve, fire... and spam the phone. Two guards here:
+#     for:              must stay over the line this long before firing
+#     keep_firing_for:  once firing, stays firing this long after the value
+#                       dips back under the line (vmalert feature; it is the
+#                       resolve-side twin of `for:`)
+#   Alertmanager adds a third: within a group it sends at most once per
+#   group_interval (monitoring/alertmanager.yml).
+
+groups:
+  - name: host
+    rules:
+      # ------------------------------------------------------------------
+      # RAM. MemAvailable (not MemFree) is the kernel's estimate of what a
+      # new program could get without swapping: free memory plus caches it
+      # can drop. Linux always fills "free" RAM with disk cache, so MemFree
+      # is near zero on a healthy machine and useless for alerting.
+      # ------------------------------------------------------------------
+      - alert: HighMemory
+        expr: |
+          100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 90
+        for: 5m
+        labels:
+          severity: normal
+        annotations:
+          subject: "{{ printf \"%.0f\" $value }}% used"
+          summary: "RAM {{ printf \"%.1f\" $value }}% used"
+          description: >-
+            Less than 10% of RAM has been available for 5 minutes. The
+            kernel may start killing containers (OOM). Biggest users:
+            docker stats --no-stream.
+
+      # ------------------------------------------------------------------
+      # Root filesystem. avail = what non-root users may still write; the
+      # ext4 reserve for root (5%) counts as used, which is the safer view.
+      # ------------------------------------------------------------------
+      - alert: DiskFull
+        expr: |
+          100 * (1 - node_filesystem_avail_bytes{mountpoint="/"}
+                   / node_filesystem_size_bytes{mountpoint="/"}) > 85
+        for: 5m
+        keep_firing_for: 15m
+        labels:
+          severity: normal
+        annotations:
+          subject: "/ {{ printf \"%.0f\" $value }}%"
+          summary: "Root disk {{ printf \"%.1f\" $value }}% full"
+          description: >-
+            The root filesystem is over 85% full. Usual suspects: docker
+            images and build cache (docker system df), logs, ~/restore-staging.
+
+      # ------------------------------------------------------------------
+      # CPU package temperature (whole chip, the hottest relevant sensor).
+      # node_hwmon_temp_celsius has only chip+sensor ("temp1"); the
+      # human name ("Package id 0") is in node_hwmon_sensor_label, so we
+      # join the two on (chip, sensor). (Second opinion without a join:
+      # node_thermal_zone_temp{type="x86_pkg_temp"}.)
+      # ------------------------------------------------------------------
+      - alert: CpuHot
+        expr: |
+          node_hwmon_temp_celsius{chip=~".*coretemp.*"}
+            * on(chip, sensor) group_left(label)
+          node_hwmon_sensor_label{label="Package id 0"}
+            > 85
+        for: 5m
+        labels:
+          severity: normal
+        annotations:
+          subject: "{{ printf \"%.0f\" $value }}°C"
+          summary: "CPU package at {{ printf \"%.0f\" $value }}°C"
+          description: >-
+            The CPU has been above 85°C for 5 minutes. Check for a runaway
+            process (top) and that the laptop vents are not blocked.
+
+      # ------------------------------------------------------------------
+      # Power cut (or the charger is unplugged). This laptop is its own UPS:
+      # the battery buys time, so you want to know NOW (urgent).
+      # Either signal counts: the AC adapter ADP1 reports offline, or the
+      # battery BAT0 reports "Discharging" (status is a label on
+      # node_power_supply_info). max() drops the labels so both halves have
+      # the same (empty) label set and `or` yields ONE alert, not two.
+      # ------------------------------------------------------------------
+      - alert: OnBattery
+        expr: |
+          (max(node_power_supply_online{power_supply="ADP1"}) == 0)
+            or
+          (max(node_power_supply_info{power_supply="BAT0", status="Discharging"}) == 1)
+        for: 1m
+        labels:
+          severity: urgent
+        annotations:
+          subject: "AC power lost"
+          summary: "Running on battery"
+          description: >-
+            The AC adapter has been offline for over a minute. Battery
+            capacity and BatteryLow alerts follow.
+
+      # ------------------------------------------------------------------
+      # Battery under 30% WHILE on battery. Urgent: at the usual drain this
+      # leaves well under an hour before a hard power-off, which can corrupt
+      # databases; time to shut down cleanly. The `and` part means a battery
+      # that is recharging after the power came back does not keep the alert
+      # open.
+      # ------------------------------------------------------------------
+      - alert: BatteryLow
+        expr: |
+          (node_power_supply_capacity{power_supply="BAT0"} < 30)
+            and on()
+          (max(node_power_supply_online{power_supply="ADP1"}) == 0)
+        for: 1m
+        labels:
+          severity: urgent
+        annotations:
+          subject: "{{ $value }}%"
+          summary: "Battery at {{ $value }}% and not charging"
+          description: >-
+            Shut the server down cleanly (sudo poweroff) before the battery
+            runs out, unless power is about to come back.

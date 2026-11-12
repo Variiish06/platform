@@ -1,0 +1,74 @@
+# Alertmanager: decides WHEN and HOW OFTEN to tell you about alerts.
+#
+# vmalert re-sends every firing alert every 30 s. Forwarding each of those to
+# the phone would be unbearable; Alertmanager turns that stream into a few
+# notifications:
+#   grouping       alerts with the same group_by labels share one message
+#   de-duplication the same alert is not re-sent until something changes...
+#   repeat         ...or until repeat_interval passes and it is STILL firing
+#   resolve        when an alert stops, one "Resolved" message
+#   silences       mute something on purpose (UI: http://alerts.exp.lab)
+#
+# Check after editing:  scripts/monitoring-check.sh
+# Reload without restart: curl -X POST http://127.0.0.1:9093/-/reload
+
+route:
+  # One group per alert name: "ContainerDown" for focal and ledger at the
+  # same time becomes ONE message listing both (an outage that takes down
+  # five containers is one buzz, not five). Different problems
+  # (ContainerDown vs DiskFull) stay separate, so a fix of one sends its
+  # own "Resolved". severity is constant per alert name, so every group is
+  # entirely urgent or entirely normal and the routes below never mix.
+  group_by: [alertname]
+
+  # Timing (see monitoring/alerts/host.yml for flapping):
+  # group_wait: after the FIRST alert of a new group, wait this long for
+  #   others to join so they arrive together (a reboot fires many at once).
+  group_wait: 30s
+  # group_interval: after a message for a group, wait at least this long
+  #   before sending an update for it (new alert joined, or one resolved).
+  #   This is also what limits a flapping alert to one message per 5 min.
+  group_interval: 5m
+  # repeat_interval: if nothing changed but it is STILL firing, remind
+  #   every 4 h. A forgotten alert does not stay silent forever; a long
+  #   one does not buzz every few minutes.
+  repeat_interval: 4h
+
+  # Default (also catches alerts without a severity label): priority 3.
+  receiver: ntfy-normal
+  routes:
+    - matchers: ['severity="urgent"']
+      receiver: ntfy-urgent
+
+# Where messages go. Both post to the ntfy topic "system" on loopback,
+# authenticated as svc-alerts (may write "system" only). The token is read
+# from a file (secrets/ntfy-alerts-token, mounted read-only; made by
+# scripts/monitoring-secrets.sh), never written in this committed file.
+#
+# The body is Alertmanager's own JSON. "?template=alert-urgent" tells ntfy to
+# format it with ntfy/templates/alert-urgent.yml (title, text, priority:
+# 5 when firing, 3 when resolved); alert-normal.yml always uses priority 3.
+receivers:
+  - name: ntfy-urgent
+    webhook_configs:
+      - url: http://127.0.0.1:2586/system?template=alert-urgent
+        send_resolved: true
+        # A phone notification has limited room; the template mentions how
+        # many alerts were left out (truncatedAlerts).
+        max_alerts: 10
+        timeout: 10s
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/ntfy-token
+
+  - name: ntfy-normal
+    webhook_configs:
+      - url: http://127.0.0.1:2586/system?template=alert-normal
+        send_resolved: true
+        max_alerts: 10
+        timeout: 10s
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/ntfy-token

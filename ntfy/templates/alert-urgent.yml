@@ -1,0 +1,41 @@
+# ntfy message template for Alertmanager notifications, severity "urgent".
+# Used when Alertmanager posts to  http://127.0.0.1:2586/system?template=alert-urgent
+# (monitoring/alertmanager.yml). Twin of alert-normal.yml: only `priority`
+# differs. (ntfy templates cannot include each other, hence the copy.)
+#
+# Alertmanager sends its own JSON ("webhook" format), not an ntfy message.
+# ntfy runs this Go template over that JSON and builds title/message/priority
+# from it. Fields used: .status ("firing" | "resolved", for the whole group),
+# .alerts[] (each with .status, .labels, .annotations, .startsAt),
+# .truncatedAlerts (alerts left out because of max_alerts).
+# Docs: https://docs.ntfy.sh/publish/#message-templating
+#
+# Phone shows e.g.   🔥 ContainerDown: focal
+#                    🔥 Container focal is not running
+#                    focal has been stopped for over 2 minutes ...
+title: |
+  {{- $a := first .alerts -}}
+  {{- if eq .status "resolved" }}✅ Resolved: {{ else }}🔥 {{ end -}}
+  {{ $a.labels.alertname }}{{ with $a.annotations.subject }}: {{ . }}{{ end -}}
+  {{ if gt (len .alerts) 1 }} ({{ len .alerts }} alerts){{ end }}
+# Times: Alertmanager runs with TZ=Asia/Kolkata, so .startsAt/.endsAt are
+# local times like "2026-11-13T01:12:55.123+05:30"; substr picks HH:MM and
+# the date out of that string.
+message: |
+  {{- range .alerts }}
+  {{- if eq .status "resolved" }}
+  ✅ Resolved: {{ .annotations.summary | default .labels.alertname }}
+  was firing {{ substr 11 16 .startsAt }} - {{ substr 11 16 .endsAt }} ({{ substr 0 10 .endsAt }})
+  {{ else }}
+  🔥 {{ .annotations.summary | default .labels.alertname }}
+  {{- with .annotations.description }}
+  {{ . }}{{ end }}
+  since {{ substr 11 16 .startsAt }} ({{ substr 0 10 .startsAt }})
+  {{ end }}
+  {{- end }}
+  {{- if .truncatedAlerts }}
+  ...and {{ .truncatedAlerts }} more (see http://alerts.exp.lab)
+  {{- end }}
+# 5 = urgent (max), 3 = normal. A "resolved" message is good news: normal.
+priority: |
+  {{- if eq .status "firing" }}5{{ else }}3{{ end -}}

@@ -38,6 +38,9 @@ services:
     volumes:
       - ./ntfy/server.yml:/etc/ntfy/server.yml:ro
       - ./data/ntfy:/var/lib/ntfy          # cache.db (messages), auth.db (users)
+      # Message templates (Phase B): turn Alertmanager's webhook JSON into
+      # a readable title/message/priority. See ntfy/server.yml template-dir.
+      - ./ntfy/templates:/etc/ntfy/templates:ro
 
     environment:
       TZ: ${TZ:-UTC}

@@ -1,0 +1,202 @@
+# Phase B: monitoring. Pulled into the "platform" project by the include:
+# list at the top of docker-compose.yml.
+#
+# Four small programs, each doing one job (the "Prometheus way"):
+#
+#   node-exporter ──┐                         (exposes host facts as text)
+#   Portal /metrics ┼──scraped every 30s──▶ victoriametrics ◀──queries── vmalert
+#   vmalert, AM ────┘                       (time-series DB)              │ firing alerts
+#                                                                         ▼
+#   iPhone / Portal ◀── ntfy topic "system" ◀── POST (webhook) ── alertmanager
+#                                                                 (groups, dedups,
+#                                                                  repeats, resolves)
+#
+# Config lives in monitoring/: scrape.yml (what to collect), alerts/*.yml
+# (when to complain), alertmanager.yml (who to tell, how often).
+#
+# Every service uses the HOST network and binds 127.0.0.1 only: they talk to
+# each other and to Portal/ntfy over loopback, and nothing here is reachable
+# from the LAN or the tailnet. The UIs are reachable only through Caddy +
+# Portal login (vm.exp.lab, alerts.exp.lab; see data/apps.yaml).
+#
+# Secrets: one file, secrets/ntfy-alerts-token, made from .env by
+# scripts/monitoring-secrets.sh. Run that script before the first start.
+
+x-mon-defaults: &mon
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+  network_mode: host
+  read_only: true                 # the image itself is never written to
+  cap_drop: [ALL]                 # none of them needs any Linux capability
+  security_opt: [no-new-privileges:true]
+
+services:
+  # ---------------------------------------------------------------------
+  # node_exporter: turns the host's /proc and /sys into metrics
+  # (CPU, memory, disks, network, temperatures, battery, AC adapter).
+  # ---------------------------------------------------------------------
+  node-exporter:
+    <<: *mon
+    # Pinned: v1.12.1 (July 2026), newest release on 12 Nov 2026.
+    image: prom/node-exporter:v1.12.1
+    # "nobody": the exporter only reads world-readable files.
+    user: "65534:65534"
+    # Host PID namespace: /proc inside the container is the HOST's /proc,
+    # so CPU, memory and load numbers describe the machine, not the container.
+    pid: host
+    command:
+      # 9100 is already taken by another app on this machine.
+      - --web.listen-address=127.0.0.1:9101
+      # The host's / is mounted at /host. The filesystem collector reads
+      # mount points from here and reports them WITHOUT the /host prefix
+      # (so the root disk is mountpoint="/").
+      - --path.rootfs=/host
+      # /sys is mounted separately (below) so sysfs readers (hwmon,
+      # thermal_zone, powersupplyclass) see the host's real /sys.
+      - --path.sysfs=/host/sys
+      # Start from nothing and switch on only what we use. Fewer
+      # collectors = fewer time series = less RAM and disk in VictoriaMetrics.
+      - --collector.disable-defaults
+      - --collector.cpu              # CPU time per mode (user, system, idle, iowait...)
+      - --collector.stat             # boot time, context switches
+      - --collector.loadavg          # 1/5/15 minute load
+      - --collector.pressure         # PSI: how long tasks waited for CPU/memory/IO
+      - --collector.meminfo          # MemTotal, MemAvailable, swap... (/proc/meminfo)
+      - --collector.filesystem       # size/free per mounted filesystem
+      - --collector.diskstats        # reads/writes/IO time per disk
+      - --collector.netdev           # bytes/packets/errors per network interface
+      - --collector.hwmon            # temperature/fan sensors (coretemp = CPU package)
+      - --collector.thermal_zone     # ACPI thermal zones (second opinion on temperature)
+      - --collector.powersupplyclass # BAT0 (battery) and ADP1 (AC adapter)
+      - --collector.uname            # kernel version (useful labels)
+      - --collector.textfile         # *.prom files written by other jobs (backups)
+      - --collector.textfile.directory=/textfile
+      # Container plumbing interfaces come and go with every container
+      # restart; each would create new time series. Only real NICs matter.
+      - --collector.netdev.device-exclude=^(lo|veth.*|br-.*|docker[0-9]*)$
+    volumes:
+      # rslave: mounts that appear on the host later (a USB disk) show up too.
+      - /:/host:ro,rslave
+      - /sys:/host/sys:ro
+      # The backup container writes backup.prom here (atomic rename).
+      - ./run/textfile:/textfile:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9101/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: 32m
+
+  # ---------------------------------------------------------------------
+  # VictoriaMetrics: the time-series database. It also does the scraping
+  # (built-in "promscrape", same config format as Prometheus).
+  # ---------------------------------------------------------------------
+  victoriametrics:
+    <<: *mon
+    # Pinned: v1.155.0 (26 Oct 2026). v1.156.0 was 3 days old on 12 Nov 2026;
+    # we take the previous release so there was time for bug-fix reports.
+    image: victoriametrics/victoria-metrics:v1.155.0
+    # The image would run as root; it only needs to write ./data/vm.
+    user: "${PUID}:${PGID}"
+    command:
+      - -httpListenAddr=127.0.0.1:8428
+      - -storageDataPath=/storage
+      # Keep 30 days; older data is deleted automatically.
+      - -retentionPeriod=30d
+      - -promscrape.config=/etc/vm/scrape.yml
+      # RAM: VictoriaMetrics sizes its caches from this budget (default:
+      # 60% of the machine's RAM!). 40 MiB of caches is plenty for a few
+      # thousand series; GOMEMLIMIT below makes Go's GC keep total heap
+      # under the container limit.
+      - -memory.allowedBytes=40MiB
+      # Its own metrics are scraped by the "victoriametrics" job in
+      # scrape.yml, so the built-in self-scraper stays off (0 = off).
+      - -selfScrapeInterval=0
+      # vm.exp.lab/vmalert/ shows vmalert's UI (rules, alert states)
+      # through VictoriaMetrics, so vmalert needs no hostname of its own.
+      - -vmalert.proxyURL=http://127.0.0.1:8880
+    environment:
+      GOMEMLIMIT: 120MiB
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./monitoring/scrape.yml:/etc/vm/scrape.yml:ro
+      - ./data/vm:/storage                 # gitignored; NOT backed up (Phase C excludes it)
+    tmpfs: ["/tmp:size=16m"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8428/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    mem_limit: 160m
+
+  # ---------------------------------------------------------------------
+  # vmalert: evaluates the rules in monitoring/alerts/ every 30 s against
+  # VictoriaMetrics and tells Alertmanager what is firing.
+  # ---------------------------------------------------------------------
+  vmalert:
+    <<: *mon
+    image: victoriametrics/vmalert:v1.155.0   # same release as the database
+    user: "${PUID}:${PGID}"
+    command:
+      - -httpListenAddr=127.0.0.1:8880
+      - -rule=/etc/vmalert/alerts/*.yml
+      - -evaluationInterval=30s
+      # Where to run the PromQL in each rule.
+      - -datasource.url=http://127.0.0.1:8428
+      # Alert state is written back to VictoriaMetrics as the ALERTS and
+      # ALERTS_FOR_STATE series, and read back on start. So a restart of
+      # vmalert does not reset a "for: 5m" timer that was 4 minutes in.
+      - -remoteWrite.url=http://127.0.0.1:8428
+      - -remoteRead.url=http://127.0.0.1:8428
+      - -notifier.url=http://127.0.0.1:9093
+      # Base of the "Source" link in every alert: vmalert's UI, reached
+      # through VictoriaMetrics' proxy at http://vm.exp.lab/vmalert/.
+      - -external.url=http://vm.exp.lab
+    environment:
+      GOMEMLIMIT: 32MiB
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./monitoring/alerts:/etc/vmalert/alerts:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8880/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on: [victoriametrics, alertmanager]
+    mem_limit: 48m
+
+  # ---------------------------------------------------------------------
+  # Alertmanager: turns "these alerts are firing" (repeated every 30 s by
+  # vmalert) into a few well-timed notifications: grouping, de-duplication,
+  # repeats, "resolved" messages, silences. Delivers to ntfy.
+  # ---------------------------------------------------------------------
+  alertmanager:
+    <<: *mon
+    # Pinned: v0.34.2 (29 Oct 2026). v0.35.0 was 3 days old on 12 Nov 2026.
+    image: prom/alertmanager:v0.34.2
+    # Same uid as the owner of secrets/ntfy-alerts-token (mode 600).
+    user: "${PUID}:${PGID}"
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager      # silences + notification log
+      - --web.listen-address=127.0.0.1:9093
+      # Empty = no cluster gossip. Otherwise Alertmanager would also listen
+      # on 0.0.0.0:9094 looking for peers. We run exactly one.
+      - --cluster.listen-address=
+      # Used for links in the UI and in notifications.
+      - --web.external-url=http://alerts.exp.lab
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./secrets/ntfy-alerts-token:/etc/alertmanager/ntfy-token:ro
+      - ./data/alertmanager:/alertmanager  # gitignored
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9093/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: 48m

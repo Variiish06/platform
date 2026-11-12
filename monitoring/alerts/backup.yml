@@ -1,0 +1,39 @@
+# Alert rules: backups. How rules work: see the top of services.yml.
+#
+# DEAD MAN'S SWITCH
+#   A train's dead man's switch stops the train when the driver STOPS
+#   pressing it. Same idea here: we do not wait for the backup job to report
+#   "I failed" (a job that never runs, hangs, or whose container is gone
+#   reports nothing at all). Instead the job proves it is alive by updating
+#   a timestamp after every SUCCESS, and we alert when that proof is too old
+#   or missing. Silence becomes the alarm.
+#
+#   The proof: the backup container writes run/textfile/backup.prom
+#   (atomic rename) with backup_last_success_timestamp_seconds = unix time
+#   of the last good backup. node_exporter's textfile collector exposes it;
+#   VictoriaMetrics scrapes it like any other metric.
+#
+#   26 h = the daily 03:00 run + 2 hours of slack for a slow run.
+#   absent(...) covers "the file was never written / was deleted / the
+#   collector is broken": no metric at all also means "no proof". So this
+#   alert fires on a brand-new install until the first backup succeeds.
+
+groups:
+  - name: backups
+    rules:
+      - alert: BackupStale
+        expr: |
+          (time() - backup_last_success_timestamp_seconds > 26 * 3600)
+            or on()
+          absent(backup_last_success_timestamp_seconds)
+        for: 10m
+        labels:
+          severity: urgent
+        annotations:
+          subject: "no backup in 26h"
+          summary: >-
+            {{ if eq $labels.job "" }}No backup has ever been recorded{{ else }}Last good backup {{ humanizeDuration $value }} ago{{ end }}
+          description: >-
+            No successful backup in the last 26 hours (or
+            run/textfile/backup.prom is missing). Check: docker compose logs
+            --tail 50 backup; data/backup/status.json.
