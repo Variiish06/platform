@@ -1,0 +1,177 @@
+# Phase C: encrypted, deduplicated backups with restic. Pulled into the
+# "platform" project by the include: list at the top of docker-compose.yml.
+#
+#   backup               restic + sqlite3 + rclone + supercronic (backup/Dockerfile)
+#   docker-proxy-backup  a second, tiny Docker socket proxy that only lets the
+#                        backup container run "pg_dump" in two Postgres containers
+#
+# How it works, how to restore, Google Drive setup: RESTORE.md.
+# Start / rebuild:  docker compose up -d --build backup docker-proxy-backup
+
+services:
+  backup:
+    build: ./backup
+    image: platform-backup:latest
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    # supercronic waits for a running job before it exits; give a backup
+    # in progress up to 2 minutes to finish when the container is stopped.
+    stop_grace_period: 2m
+
+    # Runs as root, but a root with almost every power removed. Docker's
+    # default set is dropped and only these come back:
+    cap_drop: [ALL]
+    cap_add:
+      # Read files of other users regardless of their mode, e.g. portal.db
+      # (600) and ledger's secret.key (600) owned by uid 1000, ntfy's 700
+      # directory, secrets/rclone.conf (600). Read and list only: it does not
+      # allow writing anything.
+      - DAC_READ_SEARCH
+      # setpriv: switch to the uid/gid that OWNS each SQLite database before
+      # running sqlite3 on it (so no root-owned -wal/-shm/-journal can ever
+      # appear next to a live database), and to uid 1000 to write
+      # status.json, the metrics file and restores into uid-1000 directories.
+      - SETUID
+      - SETGID
+      # Deliberately NOT added: DAC_OVERRIDE (write anywhere), CHOWN, FOWNER.
+      # Root here cannot write into uid-1000 directories at all; it writes
+      # only where root owns the directory: the repository
+      # (/var/backups/restic-local, created by Docker as root) and the two
+      # docker volumes below.
+    security_opt: [no-new-privileges:true]
+    read_only: true                     # the image is never modified
+    tmpfs: ["/tmp:size=16m"]            # lock + pid files, docker CLI config
+    mem_limit: 256m
+
+    # Bridge network shared with ntfy (http://ntfy:80) and the internet
+    # (Google Drive). No ports are published: nothing can connect TO it.
+    networks: [platform_internal]
+
+    environment:
+      TZ: Asia/Kolkata                  # cron times and log times in IST
+      # restic and rclone are Go programs. GOMEMLIMIT makes the Go garbage
+      # collector work harder as the process approaches 160 MiB (well below
+      # mem_limit, leaving room for sqlite3/tar); GOGC=50 collects more
+      # often than the default 100. Both trade a little CPU for RAM.
+      GOMEMLIMIT: 160MiB
+      GOGC: "50"
+      # From ~/platform/.env (section "Phase C: backups"). Empty values make
+      # the jobs fail LOUDLY (ntfy) instead of breaking "docker compose".
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:-}
+      BACKUP_TARGET: ${BACKUP_TARGET:-}
+      BACKUP_DRIVE_REPO: ${BACKUP_DRIVE_REPO:-rclone:gdrive:experimentos-restic}
+      NTFY_TOKEN_BACKUP: ${NTFY_TOKEN_BACKUP:-}
+      NTFY_URL: http://ntfy:80
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      # Only used to SHOW the host path of a staging restore in status.json.
+      HOST_RESTORE_STAGING: ${HOME}/restore-staging
+      # The docker CLI talks to the backup proxy, never to the real socket.
+      DOCKER_HOST: unix:///run/backup-proxy/docker.sock
+      DOCKER_CONFIG: /tmp/docker
+      TMPDIR: /work/tmp                 # restic temp files on disk, not in RAM
+
+    volumes:
+      # --- Sources --------------------------------------------------------
+      # Read-only where no live SQLite database sits. Where one does, the
+      # mount must be read-write: even a pure READER of a WAL-mode database
+      # has to write the shared-memory index (<db>-shm), and SQLite may
+      # create/remove -wal/-shm/-journal companions while it reads. sqlite3
+      # runs as the database owner (setpriv), so whatever SQLite creates
+      # there is owned by the same user as the app's own files. Nothing
+      # else in these scripts writes to /src (restic only reads).
+      - ${HOME}/platform/data:/src/platform               # rw: portal.db, ntfy/*.db
+      - ${HOME}/focal/data:/src/focal                     # rw: focal.db
+      - ${HOME}/apps/ritual/data:/src/ritual              # rw: ritual.db (WAL)
+      - ${HOME}/apps/ledger/data:/src/ledger              # rw: ledger.db (WAL)
+      - ${HOME}/gitea/data:/src/gitea:ro                  # ro: repos, conf, root-owned ssh keys
+      - ${HOME}/gitea/data/gitea:/src/gitea/gitea         # rw: gitea.db (mounted over the ro tree)
+      - ${HOME}/dsa-tracker:/src/dsa-tracker              # rw: dsa_tracker.db (WAL); only the DB is backed up
+      - ${HOME}/ramayana-imax-bot:/src/ramayana-imax-bot  # rw: state.db; only the DB is backed up
+      # --- Working areas ---------------------------------------------------
+      # Docker volumes (root-owned, not visible to the host user): DB copies
+      # and dumps contain secrets, and root needs a place it owns.
+      - backup-staging:/staging         # SQLite copies + pg dumps (~100 MB)
+      - backup-work:/work               # restic cache, temp, logs, restore-test scratch
+      # --- Repository and restore target ------------------------------------
+      - /var/backups/restic-local:/repo-local   # local restic repo (Docker creates it, root-owned)
+      - ${HOME}/restore-staging:/restore-staging  # the ONLY place restores go
+      # --- Interfaces with the rest of the platform -------------------------
+      - ./data/backup:/state            # status.json (Portal reads), requests/ (Portal writes)
+      - ./run/textfile:/textfile        # backup.prom for node_exporter
+      # rclone config for Google Drive. Read-only: rclone works on a copy in
+      # /work that it may update (refreshed tokens), see lib.sh prepare_rclone.
+      # backup/drive-setup.sh rewrites this file IN PLACE (a file bind mount
+      # follows the inode; replacing the file would hide the new one).
+      - ./secrets/rclone.conf:/secrets/rclone.conf:ro
+      - ./run/backup-proxy:/run/backup-proxy   # docker-proxy-backup's socket
+
+    depends_on: [docker-proxy-backup]
+    healthcheck:
+      test: ["CMD", "/scripts/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # A second instance of the same socket proxy Portal uses, with a far
+  # narrower allowlist: the backup container may ONLY run commands
+  # ("exec") in the two Postgres containers (and inspect those two, which
+  # the docker CLI does first), read the exec's exit code, and ping. No listing, no inspecting, no creating/stopping containers;
+  # everything else gets 403.
+  #
+  # This is still powerful: exec runs as root INSIDE dalal-postgres-1 and
+  # conveyor-postgres-1, so whoever controls the backup container could do
+  # anything in those two containers (and their databases). Chosen anyway
+  # because pg_dump has to run next to the database: the alternative,
+  # joining the backup container to the dalal and conveyor networks and
+  # storing their database passwords here, couples this project to two
+  # other projects' private networks and secrets and breaks when they
+  # change. The exec allowlist is limited to two names and nothing else.
+  docker-proxy-backup:
+    image: wollomatic/socket-proxy:1
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    command:
+      - -loglevel=INFO                    # logs every request, allowed or denied
+      - -proxysocketendpoint=/run/backup-proxy/docker.sock
+      - -proxysocketendpointfilemode=384  # = 0600: only the socket's owner may connect
+      # The docker CLI pings first (HEAD and/or GET /_ping, unversioned).
+      - -allowHEAD=^/_ping$
+      # GET: ping; an exec's state (its exit code); and "inspect" of the SAME
+      # two containers, because "docker exec" inspects the container before
+      # creating the exec (it refuses to run without it). Inspect shows the
+      # container's config incl. its environment (e.g. POSTGRES_PASSWORD),
+      # which exec-as-root in that container exposes anyway: no new power.
+      # /version is not needed by "docker exec" and stays blocked.
+      - -allowGET=^(/_ping|/v1\.[0-9]+/containers/(dalal-postgres-1|conveyor-postgres-1)/json|/v1\.[0-9]+/exec/[0-9a-f]{64}/json)$
+      # POST: create an exec in exactly these two containers, and start it.
+      - -allowPOST=^(/v1\.[0-9]+/containers/(dalal-postgres-1|conveyor-postgres-1)/exec|/v1\.[0-9]+/exec/[0-9a-f]{64}/start)$
+      - -watchdoginterval=60              # check the Docker socket every minute...
+      - -stoponwatchdog                   # ...and exit (Docker restarts it) if it is gone
+    network_mode: none                    # no network at all: only the socket file
+    # uid 0 (root without capabilities): the socket it creates is then owned
+    # by root with mode 600, so ONLY the backup container (root) can use it.
+    # Portal also sees ./run (as uid 1000) and can therefore NOT connect.
+    # (The real /var/run/docker.sock is root:docker, so root can open it.)
+    user: "0:0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./run/backup-proxy:/run/backup-proxy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 24m
+
+volumes:
+  backup-staging:
+  backup-work:
+
+networks:
+  # Same declaration as in compose.notify.yml: same key, same name.
+  platform_internal:
+    name: platform_internal

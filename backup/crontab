@@ -1,0 +1,19 @@
+# NOTE: scheduling lives here only until my own job scheduler exists; then these lines move there.
+#
+# Read by supercronic (not the system cron). Times are IST because the
+# container runs with TZ=Asia/Kolkata (compose.backup.yml); the host clock is UTC.
+# Fields: minute hour day-of-month month day-of-week   command
+# Every job takes the same lock (lib.sh), so they never overlap: a job that
+# starts while another runs waits for it.
+
+# Every night 03:00: databases -> staging, restic backup, then forget/prune.
+0 3 * * *     /scripts/backup.sh nightly
+
+# Sundays 04:00: verify the repository (structure + a rotating 1/10 of the data).
+0 4 * * 0     /scripts/check.sh
+
+# 1st of every month 04:30: restore the latest snapshot to a scratch dir and test it.
+30 4 1 * *    /scripts/restore-test.sh
+
+# Sundays 09:00: quiet (priority 1) summary to ntfy topic "backups".
+0 9 * * 0     /scripts/weekly-summary.sh

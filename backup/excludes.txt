@@ -1,0 +1,36 @@
+# restic --exclude-file for backup.sh. One pattern per line; "**" = any
+# number of directories. Paths are as seen INSIDE the backup container
+# (/src/<app> = the app's data directory on the host, see compose.backup.yml).
+
+# 1) Live SQLite files. Copying these raw while the app writes them gives a
+#    torn, possibly corrupt copy. Every database is instead copied with
+#    sqlite3 ".backup" into /staging/sqlite/ (backup.sh), and THAT is backed up.
+#    Only /src is excluded: the staged copies keep their normal names.
+/src/**/*.db
+/src/**/*.db-wal
+/src/**/*.db-shm
+/src/**/*.db-journal
+/src/**/*.sqlite
+/src/**/*.sqlite-*
+/src/**/*.sqlite3
+/src/**/*.sqlite3-*
+
+# 2) Platform: metrics (rebuilt by scraping; 30 days of graphs are not worth
+#    the space) and the backup container's own status/request files.
+/src/platform/vm
+/src/platform/backup
+
+# 3) Gitea: things Gitea rebuilds or throws away by itself.
+/src/gitea/gitea/sessions
+/src/gitea/gitea/log
+/src/gitea/gitea/tmp
+/src/gitea/gitea/indexers
+/src/gitea/gitea/queues
+/src/gitea/gitea/repo-archive
+
+# 4) Generic junk anywhere.
+**/node_modules
+**/.cache
+**/cache
+**/*.log
+**/logs
