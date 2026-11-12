@@ -55,6 +55,9 @@ func config() server.Config {
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
+	// Files this process creates (the database) are readable by the
+	// owner only: it holds the password hash.
+	syscall.Umask(0o077)
 	cmd := "serve"
 	if len(os.Args) > 1 {
 		cmd = os.Args[1]

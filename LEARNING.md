@@ -62,7 +62,7 @@ A fast hash (SHA-256) is the wrong tool, because an attacker who steals the data
 - The result stores the parameters and salt next to the hash, so they can be raised later without breaking old hashes.
 - Verifying: `password.go:66`, ending in a constant-time comparison (`password.go:98`) whose duration does not reveal how many bytes matched.
 - Only one hash runs at a time (`password.go:40`), so ten simultaneous logins cannot use 190 MiB.
-- The CLI that sets the password: `portal/cmd/portal/main.go:149`.
+- The CLI that sets the password: `portal/cmd/portal/main.go:152`.
 
 ## 5. Cookie domain scoping
 
