@@ -1,0 +1,6 @@
+# Secrets and machine-specific settings
+.env
+# Runtime state (SQLite, sockets). apps.yaml in data/ IS committed.
+data/*.db
+data/*.db-*
+run/

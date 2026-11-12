@@ -1,0 +1,26 @@
+# Phase 1: plain routing, no auth yet.
+{
+    auto_https off
+    admin off
+    default_bind {$BIND_ADDRS}
+}
+
+http://focal.{$DOMAIN} {
+    reverse_proxy 127.0.0.1:8787
+}
+http://ritual.{$DOMAIN} {
+    reverse_proxy 127.0.0.1:8090
+}
+http://git.{$DOMAIN} {
+    reverse_proxy 127.0.0.1:3000
+}
+http://bot.{$DOMAIN} {
+    reverse_proxy 127.0.0.1:8080
+}
+http://{$DOMAIN} {
+    respond "portal coming soon" 200
+}
+# Any other Host header.
+http:// {
+    respond "unknown host" 404
+}

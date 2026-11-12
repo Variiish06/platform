@@ -1,0 +1,20 @@
+# CoreDNS: authoritative for exactly one private zone.
+#
+# Anything under {$DOMAIN} (and {$DOMAIN} itself) resolves to this machine's
+# Tailscale IP. Queries for other names are REFUSED, so this is not an open
+# resolver. Tailscale "Split DNS" sends only {$DOMAIN} lookups here.
+{$DOMAIN}:53 {
+    # Listen only on the Tailscale address, never on the LAN or public side.
+    bind {$TS_IP}
+
+    # One A record for every name in the zone (wildcard).
+    template IN A {
+        answer "{{ .Name }} 60 IN A {$TS_IP}"
+    }
+    # No IPv6 address: answer "no such record" instead of an error so clients
+    # fall back to the A record immediately.
+    template IN AAAA {
+        rcode NOERROR
+    }
+    errors
+}
