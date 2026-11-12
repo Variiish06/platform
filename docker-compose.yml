@@ -57,6 +57,7 @@ services:
       PORTAL_COOKIE_SECURE: ${COOKIE_SECURE:-0}
       PORTAL_DATA: /data
       PORTAL_DOCKER_SOCK: /run/docker-proxy/docker.sock
+      TZ: ${TZ:-UTC}
       GOMEMLIMIT: 64MiB
     volumes:
       - ./data:/data                    # portal.db + apps.yaml (back this up)

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed the timezone database: the image has no /usr/share/zoneinfo
 
 	"golang.org/x/term"
 
