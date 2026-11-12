@@ -58,6 +58,8 @@ func config() server.Config {
 		CookieSecure: env("PORTAL_COOKIE_SECURE", "0") == "1",
 		NtfyURL:      os.Getenv("PORTAL_NTFY_URL"),
 		NtfyToken:    os.Getenv("PORTAL_NTFY_TOKEN"),
+		VMURL:        os.Getenv("PORTAL_VM_URL"),
+		BackupDir:    os.Getenv("PORTAL_BACKUP_DIR"), // default <data>/backup
 	}
 }
 

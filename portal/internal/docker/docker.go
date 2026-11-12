@@ -19,7 +19,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -29,12 +28,17 @@ const apiVersion = "v1.44"
 
 // Container is what the dashboard shows for one container.
 type Container struct {
-	ID       string
-	Name     string
-	Image    string
-	State    string // running, exited, restarting, paused, created, dead
-	Status   string // human text from Docker: "Up 2 days (healthy)"
-	MemBytes uint64 // 0 when not running or unknown
+	ID     string
+	Name   string // without Docker's leading slash
+	Image  string
+	State  string // running, exited, restarting, paused, created, dead
+	Status string // human text from Docker: "Up 2 days (healthy)"
+
+	// Filled in by the stats collector (see stats.go), running containers only.
+	MemBytes   uint64  // 0 when not running or unknown
+	MemOK      bool    // MemBytes is a real reading
+	CPUPercent float64 // 100 = one full core, like "docker stats"
+	CPUOK      bool    // CPUPercent is a real reading (needs two samples)
 }
 
 // Running reports whether the container is up.
@@ -54,7 +58,10 @@ func New(socketPath string) *Client {
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "unix", socketPath)
 			},
-			MaxIdleConns:    4,
+			// The stats collector runs up to statsWorkers requests at once;
+			// keep that many connections around between rounds.
+			MaxIdleConns:        statsWorkers,
+			MaxIdleConnsPerHost: statsWorkers,
 			IdleConnTimeout: 30 * time.Second,
 		},
 	}}
@@ -75,14 +82,18 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 		return fmt.Errorf("docker %s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(body)))
 	}
 	if out == nil {
-		io.Copy(io.Discard, resp.Body)
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	// A stats document is ~3 KB and a list of 20 containers ~30 KB; 4 MB
+	// is a generous ceiling that still stops a runaway response.
+	return json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out)
 }
 
-// List returns all containers (running and stopped) with memory use for
-// the running ones, sorted running-first, then by name.
+// List returns all containers (running and stopped), sorted running-first,
+// then by name. It makes exactly one API call; resource usage comes from
+// Stats, which the caller runs per container (see the collector in the
+// server package).
 func (c *Client) List(ctx context.Context) ([]Container, error) {
 	var raw []struct {
 		ID     string `json:"Id"`
@@ -94,25 +105,17 @@ func (c *Client) List(ctx context.Context) ([]Container, error) {
 	if err := c.do(ctx, http.MethodGet, "/containers/json?all=1", &raw); err != nil {
 		return nil, err
 	}
-	out := make([]Container, len(raw))
-	var wg sync.WaitGroup
-	for i, r := range raw {
+	out := make([]Container, 0, len(raw))
+	for _, r := range raw {
+		if !ValidID(r.ID) {
+			continue // never put something we cannot validate into a URL later
+		}
 		name := r.ID[:12]
 		if len(r.Names) > 0 {
 			name = strings.TrimPrefix(r.Names[0], "/")
 		}
-		out[i] = Container{ID: r.ID, Name: name, Image: r.Image, State: r.State, Status: r.Status}
-		if r.State != "running" {
-			continue
-		}
-		// One stats request per running container, all in parallel.
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			out[i].MemBytes = c.memory(ctx, r.ID)
-		}()
+		out = append(out, Container{ID: r.ID, Name: name, Image: r.Image, State: r.State, Status: r.Status})
 	}
-	wg.Wait()
 	sort.SliceStable(out, func(a, b int) bool {
 		if out[a].Running() != out[b].Running() {
 			return out[a].Running()
@@ -120,33 +123,6 @@ func (c *Client) List(ctx context.Context) ([]Container, error) {
 		return out[a].Name < out[b].Name
 	})
 	return out, nil
-}
-
-// memory returns a container's RAM use the way "docker stats" shows it.
-func (c *Client) memory(ctx context.Context, id string) uint64 {
-	var st struct {
-		MemoryStats struct {
-			Usage uint64            `json:"usage"`
-			Stats map[string]uint64 `json:"stats"`
-		} `json:"memory_stats"`
-	}
-	// one-shot=true returns a single sample immediately instead of
-	// waiting a second to compute CPU deltas we do not need.
-	if err := c.do(ctx, http.MethodGet, "/containers/"+id+"/stats?stream=false&one-shot=true", &st); err != nil {
-		return 0
-	}
-	usage := st.MemoryStats.Usage
-	// "usage" includes page cache the kernel can drop at any time.
-	// Subtract it (cgroup v2: inactive_file; v1: total_inactive_file),
-	// exactly as the docker CLI does.
-	cache := st.MemoryStats.Stats["inactive_file"]
-	if cache == 0 {
-		cache = st.MemoryStats.Stats["total_inactive_file"]
-	}
-	if cache < usage {
-		usage -= cache
-	}
-	return usage
 }
 
 var idRe = regexp.MustCompile(`^[a-f0-9]{12,64}$`)

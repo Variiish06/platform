@@ -20,6 +20,15 @@
     <span class="tile-desc">{{if .Desc}}{{.Desc}}{{else}}{{.Host}}{{end}}</span>
     <span class="tile-foot">
       <span class="status" data-state="{{.State}}"><i class="dot"></i>{{.Detail}}</span>
+      {{/* 30 daily segments, oldest left. Colours are CSS classes (the CSP
+           forbids inline styles); the title on each segment is the
+           tooltip; role=img + aria-label is the screen-reader version. */}}
+      {{with .Uptime}}
+      <span class="uptime">
+        <span class="upbar" role="img" aria-label="{{.Aria}}">{{range .Segs}}<i class="{{.Level}}" title="{{.Title}}"></i>{{end}}</span>
+        <span class="up-label" data-level="{{.Level}}" aria-hidden="true">{{.Label}}</span>
+      </span>
+      {{end}}
     </span>
   </a>
   {{end}}
@@ -57,7 +66,7 @@
       <span class="row-name">{{.Name}}</span>
       <span class="row-status">{{.Status}}</span>
     </span>
-    <span class="row-mem">{{.Mem}}</span>
+    <span class="row-mem">{{.Mem}}{{if .CPU}}<span class="row-cpu" title="CPU, 100% = one core">{{.CPU}}</span>{{end}}</span>
     <button class="icon-btn" type="button" data-restart="{{.ID}}" data-name="{{.Name}}" data-running="{{.Running}}"
             aria-label="{{if .Running}}Restart{{else}}Start{{end}} {{.Name}}" title="{{if .Running}}Restart{{else}}Start{{end}}">
       <svg class="ico"><use href="#{{if .Running}}i-restart{{else}}i-play{{end}}"/></svg>
@@ -99,4 +108,45 @@
 {{else if eq .State "ok"}}
 <p class="empty">No notifications in the last 7 days. Send one: see <span class="mono">NOTIFY.md</span>.</p>
 {{end}}
+{{end}}
+
+{{/* Backups. status.json is written by the backup container; every value
+     is treated as untrusted text and escaped by html/template. */}}
+{{define "backup"}}
+<div class="sec-head">
+  <h2>Backups</h2>
+  <span class="count">{{if .Target}}{{.Target}}{{else if eq .State "none"}}not set up yet{{end}}</span>
+</div>
+<div class="backup{{if .Warn}} warn{{end}}" data-state="{{.State}}">
+  {{if .Running}}
+  <p class="bk-line running" role="status"><i class="pulse" aria-hidden="true"></i>{{.Running}}…</p>
+  {{else if .Pending}}
+  <p class="bk-line running" role="status"><i class="pulse" aria-hidden="true"></i>Requested {{.PendingAgo}} · waiting for the backup service to pick it up…</p>
+  {{end}}
+  {{if eq .State "error"}}
+  <p class="banner" role="alert">{{.Error}}</p>
+  {{else if eq .State "none"}}
+  <p class="bk-head">{{.Headline}}</p>
+  <p class="bk-sub">The backup service writes its status to <span class="mono">data/backup/status.json</span>; it appears here as soon as it exists.</p>
+  {{else}}
+  <p class="bk-head" {{if .Warn}}role="alert"{{end}}>{{.Headline}}</p>
+  <dl class="kv">
+    {{range .Rows}}
+    <div class="kv-row" data-state="{{.State}}">
+      <dt>{{.Label}}</dt>
+      <dd>
+        <span class="kv-v">{{if .TS}}<time data-ts="{{.TS}}" title="{{.Abs}}">{{.Value}}</time>{{else}}{{.Value}}{{end}}</span>
+        {{if .Sub}}<span class="kv-s"{{if .SubFull}} title="{{.SubFull}}"{{end}}>{{.Sub}}</span>{{end}}
+      </dd>
+    </div>
+    {{end}}
+  </dl>
+  {{end}}
+  <div class="bk-actions">
+    <button class="btn primary" type="button" data-backup="run" {{if or .Running .Pending}}disabled{{end}}>Back up now</button>
+    <button class="btn" type="button" data-backup="restore" {{if or .Running .Pending}}disabled{{end}}>Restore to staging…</button>
+  </div>
+  {{/* Inert list the restore dialog copies its choices from. */}}
+  <template id="snap-options">{{range .Snaps}}<option value="{{.ID}}">{{.Label}}</option>{{end}}</template>
+</div>
 {{end}}

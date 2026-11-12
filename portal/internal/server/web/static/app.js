@@ -1,6 +1,6 @@
 // Dashboard live updates. No framework: the server renders HTML, and this
 // file only (1) listens to the event stream and swaps content in, and
-// (2) handles the restart button.
+// (2) handles the restart and backup buttons.
 (function () {
   'use strict';
   const $ = (sel, root) => (root || document).querySelector(sel);
@@ -99,6 +99,7 @@
     source.addEventListener('containers', function (e) { $('#containers').innerHTML = e.data; markBusy(); });
     source.addEventListener('system', function (e) { updateStats(JSON.parse(e.data)); });
     source.addEventListener('notify', function (e) { $('#notify').innerHTML = e.data; updateTimes(); });
+    source.addEventListener('backup', function (e) { $('#backup').innerHTML = e.data; updateTimes(); });
   }
 
   // Phones suspend background tabs and silently kill the connection.
@@ -155,6 +156,58 @@
       })
       .finally(function () { busy.delete(job.id); markBusy(); });
   });
+
+  // ---- Backup buttons -------------------------------------------------------
+  // Both only ask the server to drop a request file; the backup container
+  // does the work. The panel then shows "Requested…" and, a few seconds
+  // later, "Backing up…" as status.json changes (pushed over /events).
+  function backupPost(path, body, label) {
+    document.querySelectorAll('[data-backup]').forEach(function (b) { b.disabled = true; });
+    return fetch(path, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : '{}'
+    }).then(function (r) {
+      if (r.status === 401) { location.href = '/login'; return; }
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        if (r.ok) { toast(label + ' requested. It starts within a few seconds.'); return; }
+        toast(j.error || ('Request failed (' + r.status + ')'), true);
+        document.querySelectorAll('[data-backup]').forEach(function (b) { b.disabled = false; });
+      });
+    }).catch(function () {
+      toast('Could not reach Portal.', true);
+      document.querySelectorAll('[data-backup]').forEach(function (b) { b.disabled = false; });
+    });
+  }
+
+  const restoreDialog = $('#restore-dialog');
+  const restoreSnap = $('#restore-snap');
+  document.addEventListener('click', function (e) {
+    const btn = e.target.closest('[data-backup]');
+    if (!btn || btn.disabled) return;
+    if (btn.dataset.backup === 'run') {
+      backupPost('/api/backup/run', null, 'Backup');
+      return;
+    }
+    // Fill the snapshot list from the panel's inert <template>: "Latest"
+    // first, then the snapshots status.json listed (ids already validated
+    // on the server; option text is set as text, not HTML).
+    restoreSnap.textContent = '';
+    const latest = document.createElement('option');
+    latest.value = 'latest';
+    latest.textContent = 'Latest';
+    restoreSnap.appendChild(latest);
+    const tpl = $('#snap-options');
+    if (tpl) restoreSnap.appendChild(tpl.content.cloneNode(true));
+    restoreDialog.returnValue = 'cancel';
+    restoreDialog.showModal();
+  });
+  if (restoreDialog) {
+    restoreDialog.addEventListener('close', function () {
+      if (restoreDialog.returnValue !== 'ok') return;
+      backupPost('/api/backup/restore-staging', { snapshot: restoreSnap.value || 'latest' }, 'Restore to staging');
+    });
+  }
 
   applyBars(document);
   // Seed the sparkline with the history the server put in the page.

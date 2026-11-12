@@ -11,6 +11,7 @@
   <div class="top-in">
     {{template "brand"}}
     <span class="host mono">{{.Host}}</span>
+    <nav class="nav" aria-label="Pages"><a href="/" aria-current="page">Dashboard</a><a href="/graphs">Graphs</a></nav>
     <span class="live" id="live" data-state="connecting" role="status"><i class="dot"></i><span id="live-text">Connecting</span></span>
     <form method="post" action="/logout">
       <button class="icon-btn" type="submit" aria-label="Sign out" title="Sign out"><svg class="ico"><use href="#i-logout"/></svg></button>
@@ -28,6 +29,8 @@
 
   <section class="sec" id="containers" aria-label="Containers">{{template "containers" .Containers}}</section>
 
+  <section class="sec" id="backup" aria-label="Backups">{{template "backup" .Backup}}</section>
+
   <section class="sec" id="notify" aria-label="Notifications">{{template "notify" .Notify}}</section>
 </main>
 
@@ -38,6 +41,22 @@
     <div class="dialog-actions">
       <button class="btn" value="cancel" type="submit">Cancel</button>
       <button class="btn primary" value="ok" type="submit" id="confirm-ok">Restart</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="restore-dialog" class="dialog" aria-labelledby="restore-title">
+  <form method="dialog">
+    <h3 id="restore-title">Restore to staging?</h3>
+    <p>This copies a snapshot into a new folder under <span class="mono">~/restore-staging/</span> on the server, so you can look at or copy files from it.</p>
+    <p><strong>It never touches live data:</strong> no app, database or container is changed or stopped.</p>
+    <label class="field restore-pick">
+      <span>Snapshot</span>
+      <select id="restore-snap" name="snapshot"><option value="latest">Latest</option></select>
+    </label>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" type="submit">Cancel</button>
+      <button class="btn primary" value="ok" type="submit">Restore</button>
     </div>
   </form>
 </dialog>

@@ -2,26 +2,74 @@ package server
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
 
 // Metrics counts events for the /metrics endpoint.
 //
-// The Prometheus text format is simple enough to write by hand, which
-// avoids pulling in the official client library (and its memory):
+// Monitoring here is PULL-based: Portal does not send numbers anywhere.
+// It only keeps current values in memory and prints them, as plain text,
+// whenever something asks GET /metrics. VictoriaMetrics asks every 30 s
+// ("scrapes"), stamps each line with the scrape time and stores it; that
+// sequence of (time, value) pairs is a time series. The upside of pull:
+// a dead target is noticed by the scraper (the scrape fails, up == 0)
+// instead of silently going quiet.
 //
-//	# TYPE name counter
-//	name{label="value"} 42
+// The Prometheus text exposition format is simple enough to write by
+// hand, which avoids pulling in the official client library (and its
+// memory). One line per series, preceded by HELP/TYPE comments:
+//
+//	# HELP portal_app_up Whether the app's last health check succeeded.
+//	# TYPE portal_app_up gauge
+//	portal_app_up{app="focal"} 1
+//
+// The name plus the set of labels identifies the series. A "counter"
+// only goes up (the database computes rates from it); a "gauge" is a
+// current reading that can go up and down.
 type Metrics struct {
-	mu       sync.Mutex
-	requests map[string]uint64 // "handler|code"
-	logins   map[string]uint64 // ok, failed, rate_limited
-	verifies map[string]uint64 // allowed, denied, unknown_host
-	notifies map[string]uint64 // /api/notify results, see notifyResults
+	mu         sync.Mutex
+	requests   map[string]uint64 // "handler|code"
+	logins     map[string]uint64 // ok, failed, rate_limited
+	verifies   map[string]uint64 // allowed, denied, unknown_host
+	notifies   map[string]uint64 // /api/notify results, see notifyResults
+	backupReqs map[string]uint64 // "action|result", see backupResults
+}
+
+// backupResults are the values of portal_backup_requests_total{result=...}.
+var backupResults = []string{"accepted", "invalid", "busy", "rate_limited", "error"}
+
+// backupActions are the values of portal_backup_requests_total{action=...}.
+var backupActions = []string{"backup", "restore-staging"}
+
+// escapeLabel makes s safe inside label="...". The exposition format
+// needs exactly three escapes: backslash, double quote and newline.
+// (Go's %q is close but not the same: it also escapes tabs and non-ASCII
+// as \t or \u00e9, which a Prometheus parser would read literally.)
+func escapeLabel(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	return labelEscaper.Replace(s)
+}
+
+var labelEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+
+// formatFloat prints a sample value. NaN and infinities have fixed
+// spellings in the format; everything else is the shortest exact decimal.
+func formatFloat(v float64) string {
+	switch {
+	case math.IsNaN(v):
+		return "NaN"
+	case math.IsInf(v, 1):
+		return "+Inf"
+	case math.IsInf(v, -1):
+		return "-Inf"
+	}
+	return strconv.FormatFloat(v, 'g', -1, 64)
 }
 
 // notifyResults are the values of portal_notify_total{result=...}.
@@ -29,7 +77,8 @@ var notifyResults = []string{"ok", "invalid", "unauthorized", "forbidden", "rate
 
 // NewMetrics returns zeroed counters.
 func NewMetrics() *Metrics {
-	return &Metrics{requests: map[string]uint64{}, logins: map[string]uint64{}, verifies: map[string]uint64{}, notifies: map[string]uint64{}}
+	return &Metrics{requests: map[string]uint64{}, logins: map[string]uint64{}, verifies: map[string]uint64{},
+		notifies: map[string]uint64{}, backupReqs: map[string]uint64{}}
 }
 
 func (m *Metrics) Request(handler string, code int) {
@@ -41,6 +90,17 @@ func (m *Metrics) Request(handler string, code int) {
 func (m *Metrics) Login(result string)  { m.mu.Lock(); m.logins[result]++; m.mu.Unlock() }
 func (m *Metrics) Verify(result string) { m.mu.Lock(); m.verifies[result]++; m.mu.Unlock() }
 func (m *Metrics) Notify(result string) { m.mu.Lock(); m.notifies[result]++; m.mu.Unlock() }
+func (m *Metrics) BackupRequest(action, result string) {
+	m.mu.Lock()
+	m.backupReqs[action+"|"+result]++
+	m.mu.Unlock()
+}
+
+func (s *Server) dockerError() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dockerErr
+}
 
 func sortedKeys(m map[string]uint64) []string {
 	keys := make([]string, 0, len(m))
@@ -94,6 +154,15 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	for _, k := range notifyResults {
 		fmt.Fprintf(&b, "portal_notify_total{result=%q} %d\n", k, m.notifies[k])
 	}
+	// Every action/result pair is printed, zeros included: a counter that
+	// appears only after its first increment makes rate() miss that first
+	// event.
+	b.WriteString("# HELP portal_backup_requests_total Backup/restore requests from the dashboard, by action and result.\n# TYPE portal_backup_requests_total counter\n")
+	for _, a := range backupActions {
+		for _, r := range backupResults {
+			fmt.Fprintf(&b, "portal_backup_requests_total{action=\"%s\",result=\"%s\"} %d\n", a, r, m.backupReqs[a+"|"+r])
+		}
+	}
 	m.mu.Unlock()
 
 	gauge("portal_sessions_active", "Live login sessions.", float64(s.sessions.CountActive()))
@@ -103,12 +172,20 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	list := s.apps.List()
 	for _, a := range list {
 		st, _ := s.apps.Status(a.ID)
-		fmt.Fprintf(&b, "portal_app_up{app=%q} %g\n", a.ID, bool01(st.Up))
+		fmt.Fprintf(&b, "portal_app_up{app=\"%s\"} %g\n", escapeLabel(a.ID), bool01(st.Up))
 	}
 	b.WriteString("# HELP portal_app_response_seconds Response time of the app's last health check.\n# TYPE portal_app_response_seconds gauge\n")
 	for _, a := range list {
 		st, _ := s.apps.Status(a.ID)
-		fmt.Fprintf(&b, "portal_app_response_seconds{app=%q} %g\n", a.ID, st.Latency.Seconds())
+		fmt.Fprintf(&b, "portal_app_response_seconds{app=\"%s\"} %g\n", escapeLabel(a.ID), st.Latency.Seconds())
+	}
+
+	// Containers: served from the background collector's cache. A scrape
+	// never waits for Docker (see collectContainers).
+	containers, fresh := s.containerSnapshot()
+	gauge("portal_docker_up", "1 if the last container collection round succeeded recently.", bool01(fresh && s.dockerError() == ""))
+	if fresh {
+		writeContainerMetrics(&b, containers)
 	}
 
 	s.mu.RLock()

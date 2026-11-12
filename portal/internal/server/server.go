@@ -21,6 +21,7 @@ import (
 	"portal/internal/apps"
 	"portal/internal/auth"
 	"portal/internal/docker"
+	"portal/internal/metricsdb"
 	"portal/internal/notify"
 	"portal/internal/sysinfo"
 )
@@ -38,6 +39,8 @@ type Config struct {
 	CookieSecure bool   // true once the site is served over HTTPS
 	NtfyURL      string // e.g. http://127.0.0.1:2586; empty disables notifications
 	NtfyToken    string // Portal's READ-ONLY ntfy token, used only for polling
+	VMURL        string // VictoriaMetrics, e.g. http://127.0.0.1:8428; empty disables graphs/uptime
+	BackupDir    string // shared with the backup container; default <DataDir>/backup
 }
 
 // Scheme is the URL scheme browsers use to reach the site.
@@ -63,7 +66,8 @@ type Server struct {
 	limiter  *auth.Limiter
 	apps     *apps.Registry
 	sys      *sysinfo.Collector
-	docker   *docker.Client
+	docker   dockerAPI
+	vm       *metricsdb.Client // nil when not configured
 	hub      *Hub
 	metrics  *Metrics
 	tmpl     *template.Template
@@ -76,14 +80,28 @@ type Server struct {
 	hostname string
 	version  string // cache-busting suffix for static files
 
+	graphCache *graphCache
+
+	// Backups: the shared directory, and the request rate limit.
+	backupDir          string
+	backupMu           sync.Mutex // serialises request handling (check, then write)
+	backupLastAccepted time.Time
+
+	// Container collector state, only touched with collectMu held.
+	collectMu sync.Mutex
+	cpuPrev   map[string]docker.CPUSample // last CPU sample per container ID
+
 	// Latest readings, shared between the background loops (writers) and
 	// the HTTP handlers (readers).
 	mu           sync.RWMutex
 	lastSys      sysinfo.Snapshot
 	cpuHist      []float64
 	containers   []docker.Container
-	containersAt time.Time
+	containersAt time.Time // last successful collection
 	dockerErr    string
+	uptime       uptimeData
+	vmCheckedAt  time.Time // last VictoriaMetrics call (any outcome)
+	vmErr        string    // its error, "" if it worked
 }
 
 // New builds a server. It does not start listening.
@@ -97,6 +115,10 @@ func New(cfg Config, db *sql.DB) (*Server, error) {
 		return nil, err
 	}
 	host, _ := os.Hostname()
+	backupDir := cfg.BackupDir
+	if backupDir == "" {
+		backupDir = filepath.Join(cfg.DataDir, "backup")
+	}
 	return &Server{
 		cfg: cfg, db: db,
 		sessions: auth.NewSessionStore(db),
@@ -104,6 +126,7 @@ func New(cfg Config, db *sql.DB) (*Server, error) {
 		apps:     reg,
 		sys:      sysinfo.New(cfg.DataDir),
 		docker:   docker.New(cfg.DockerSock),
+		vm:       metricsdb.New(cfg.VMURL),
 		hub:      NewHub(),
 		metrics:  NewMetrics(),
 		tmpl:     tmpl,
@@ -113,6 +136,10 @@ func New(cfg Config, db *sql.DB) (*Server, error) {
 		notifyPoll:  notify.NewPoller(cfg.NtfyURL, cfg.NtfyToken),
 		notifyPub:   notify.NewPublisher(cfg.NtfyURL),
 		notifyLimit: notify.NewRateLimiter(60, time.Minute),
+
+		graphCache: newGraphCache(),
+		backupDir:  backupDir,
+		cpuPrev:    map[string]docker.CPUSample{},
 	}, nil
 }
 
@@ -170,6 +197,13 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /events", s.wrap("events", s.handleEvents))
 	mux.Handle("GET /api/session", s.wrap("session", s.handleSessionProbe))
 	mux.Handle("POST /api/containers/{id}/restart", s.wrap("restart", s.handleRestart))
+	mux.Handle("GET /graphs", s.wrap("graphs", s.handleGraphsPage))
+	mux.Handle("GET /api/graphs/{name}", s.wrap("graph_data", s.handleGraphData))
+	mux.Handle("POST /api/backup/run", s.wrap("backup_request", s.handleBackupRun))
+	mux.Handle("POST /api/backup/restore-staging", s.wrap("backup_request", s.handleBackupRestore))
+
+	// Open on loopback without X-Forwarded-For (the scraper); session
+	// otherwise. See handleMetrics.
 	mux.Handle("GET /metrics", s.wrap("metrics", s.handleMetrics))
 	return mux
 }

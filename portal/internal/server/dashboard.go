@@ -37,6 +37,7 @@ type appView struct {
 	State                       string // up, down, unknown
 	Detail                      string // "Up · 12 ms", "Down · connection refused"
 	Open                        bool   // no Portal login in front of it
+	Uptime                      uptimeView
 }
 
 type appsData struct {
@@ -47,6 +48,7 @@ type appsData struct {
 
 type containerView struct {
 	ID, Name, Status, State, Mem string
+	CPU                          string // "3.2%" or "" until two samples exist
 	Running                      bool
 }
 
@@ -62,6 +64,7 @@ type dashboardPage struct {
 	Apps          appsData
 	Containers    containersData
 	Notify        notifData
+	Backup        backupData
 }
 
 // level turns a number into "", "warn" or "bad" against two thresholds.
@@ -190,6 +193,7 @@ func (s *Server) appsView() appsData {
 				v.State, v.Detail = "down", "Down · "+st.Err
 			}
 		}
+		v.Uptime = s.uptimeFor(a.ID)
 		d.Tiles = append(d.Tiles, v)
 	}
 	d.Total = len(d.Tiles)
@@ -205,10 +209,22 @@ func (s *Server) containersView() containersData {
 		if c.Running() {
 			d.Running++
 		}
-		d.Rows = append(d.Rows, containerView{ID: c.ID, Name: c.Name, Status: c.Status, State: c.State,
-			Mem: fmtBytes(c.MemBytes), Running: c.Running()})
+		v := containerView{ID: c.ID, Name: c.Name, Status: c.Status, State: c.State,
+			Mem: fmtBytes(c.MemBytes), Running: c.Running()}
+		if c.CPUOK {
+			v.CPU = fmtCPU(c.CPUPercent)
+		}
+		d.Rows = append(d.Rows, v)
 	}
 	return d
+}
+
+// fmtCPU: "0.4%", "12%", "150%" (100% = one core).
+func fmtCPU(p float64) string {
+	if p < 10 {
+		return fmt.Sprintf("%.1f%%", p)
+	}
+	return fmt.Sprintf("%.0f%%", p)
 }
 
 // ---- Handlers ----
@@ -218,15 +234,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login?next="+url.QueryEscape(s.cfg.BaseURL()+"/"), http.StatusFound)
 		return
 	}
-	// The container list is only refreshed while someone is watching, so
-	// the first visitor after a quiet period triggers a refresh.
+	// Everything on this page comes from caches the background loops keep
+	// fresh (containers every 30 s, uptime every 5 min, backups every 10 s):
+	// rendering never waits on Docker or VictoriaMetrics.
 	s.mu.RLock()
-	stale := time.Since(s.containersAt) > 15*time.Second
 	sys := s.lastSys
 	s.mu.RUnlock()
-	if stale {
-		s.refreshContainers(r.Context())
-	}
 	stats := buildStats(sys)
 	s.mu.RLock()
 	hist := make([]string, len(s.cpuHist))
@@ -238,7 +251,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, "dashboard.html", dashboardPage{
 		V: s.version, Host: s.hostname, User: s.cfg.User,
 		Stats: stats, Apps: s.appsView(), Containers: s.containersView(),
-		Notify: s.notifView(),
+		Notify: s.notifView(), Backup: s.backupView(),
 	})
 }
 
@@ -346,28 +359,13 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Docker refused the restart", http.StatusBadGateway)
 		return
 	}
-	s.refreshContainers(ctx)
+	s.collectContainers(ctx)
 	s.publishContainers()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"restarted": name})
 }
 
 // ---- Background work ----
-
-func (s *Server) refreshContainers(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	list, err := s.docker.List(ctx)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.containersAt = time.Now()
-	if err != nil {
-		s.dockerErr = "Can't reach Docker. Is the socket proxy running?"
-		log.Printf("docker list: %v", err)
-		return
-	}
-	s.containers, s.dockerErr = list, ""
-}
 
 func (s *Server) sampleSystem() {
 	snap := s.sys.Snapshot()
@@ -444,14 +442,39 @@ func (s *Server) startBackground(ctx context.Context) {
 		s.publishSystem()
 	})
 
-	// Containers: every 10s, only while a dashboard is open.
+	// Containers: every 30s always (they feed /metrics, which
+	// VictoriaMetrics scrapes whether or not anyone looks), and every 10s
+	// while a dashboard is open. The ticker runs at the fast rate and
+	// skips rounds when nobody watches and the data is still young.
+	go func() { s.collectContainers(ctx); s.publishContainers() }()
 	every(10*time.Second, func() {
-		if s.hub.Count() == 0 {
+		s.mu.RLock()
+		age := time.Since(s.containersAt)
+		s.mu.RUnlock()
+		if s.hub.Count() == 0 && age < 29*time.Second {
 			return
 		}
-		s.refreshContainers(ctx)
+		s.collectContainers(ctx)
 		s.publishContainers()
 	})
+
+	// Uptime bars: ask VictoriaMetrics every 5 minutes (daily numbers do
+	// not move faster than that). The first fetch waits a few seconds so
+	// a Portal restart does not race VictoriaMetrics' own start.
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
+		s.refreshUptime(ctx)
+	}()
+	every(uptimeInterval, func() { s.refreshUptime(ctx) })
+
+	// Backups panel: re-read status.json every 10s. The hub only sends
+	// the fragment when the rendered HTML changed.
+	s.publishBackup()
+	every(backupPollInterval, s.publishBackup)
 
 	// Notifications: poll ntfy every 15s, always (cheap: each poll asks
 	// only for messages newer than the last one seen). The first poll

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{template "head" .}}
+<title>Graphs · exp.lab</title>
+<link rel="stylesheet" href="/static/vendor/uPlot.min.css?v={{.V}}">
+<script src="/static/vendor/uPlot.iife.min.js?v={{.V}}" defer></script>
+<script src="/static/graphs.js?v={{.V}}" defer></script>
+</head>
+<body>
+{{template "icons"}}
+<header class="top">
+  <div class="top-in">
+    {{template "brand"}}
+    <span class="host mono">{{.Host}}</span>
+    <nav class="nav" aria-label="Pages"><a href="/">Dashboard</a><a href="/graphs" aria-current="page">Graphs</a></nav>
+    <form method="post" action="/logout" class="push-right">
+      <button class="icon-btn" type="submit" aria-label="Sign out" title="Sign out"><svg class="ico"><use href="#i-logout"/></svg></button>
+    </form>
+  </div>
+</header>
+
+<main class="page graphs-page">
+  <section class="sec">
+    <div class="sec-head graphs-head">
+      <h2>Graphs</h2>
+      <div class="ranges" role="group" aria-label="Time range">
+        {{range .Ranges}}<button type="button" class="range-btn" data-range="{{.}}" aria-pressed="false">{{.}}</button>{{end}}
+      </div>
+    </div>
+    {{/* Server-side first guess from the last known state (no waiting on
+         VictoriaMetrics); graphs.js shows/hides it as fetches succeed or fail. */}}
+    <p class="banner" id="vm-banner" role="alert" data-vm="{{.VMState}}"{{if not (or (eq .VMState "down") (eq .VMState "off"))}} hidden{{end}}>
+      <strong>VictoriaMetrics is not reachable.</strong>
+      {{if eq .VMState "off"}}PORTAL_VM_URL is not set.{{else}}Charts will fill in when it is back; this page retries by itself.{{end}}
+    </p>
+    <div class="charts" id="charts">
+      {{range .Panels}}
+      <figure class="chart" data-graph="{{.Name}}" data-unit="{{.Unit}}">
+        <figcaption class="chart-head">
+          <span class="chart-title">{{.Title}}</span>
+          <span class="chart-desc">{{.Desc}}</span>
+        </figcaption>
+        <div class="chart-plot" aria-hidden="true"></div>
+        <p class="chart-empty">Loading…</p>
+        <ul class="chart-legend" aria-label="{{.Title}}, latest values"></ul>
+      </figure>
+      {{end}}
+    </div>
+  </section>
+</main>
+</body>
+</html>
