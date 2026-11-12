@@ -8,3 +8,9 @@ run/*
 !run/.gitkeep
 # ntfy state: message cache and user database (holds token values)
 data/ntfy/
+# Secret files generated from .env (tokens, rclone config)
+secrets/
+# VictoriaMetrics data, backup state/requests
+data/vm/
+data/alertmanager/
+data/backup/

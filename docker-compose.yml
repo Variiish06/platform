@@ -6,6 +6,8 @@ name: platform
 # ("platform"): they share .env and appear in "docker compose ps".
 include:
   - compose.notify.yml          # Phase A: ntfy notification hub
+  - compose.monitoring.yml      # Phase B: metrics, alerts
+  - compose.backup.yml          # Phase C: restic backups
 
 x-defaults: &defaults
   restart: unless-stopped
@@ -68,6 +70,8 @@ services:
       # Empty or unreachable is fine: the panel says "ntfy not reachable".
       PORTAL_NTFY_URL: http://127.0.0.1:2586
       PORTAL_NTFY_TOKEN: ${NTFY_TOKEN_PORTAL:-}
+      # Graphs page + uptime bars: Portal queries VictoriaMetrics (Phase B).
+      PORTAL_VM_URL: http://127.0.0.1:8428
     volumes:
       - ./data:/data                    # portal.db + apps.yaml (back this up)
       - ./run:/run/docker-proxy         # the proxy's socket, NOT the real Docker socket
