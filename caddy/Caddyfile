@@ -1,25 +1,60 @@
-# Phase 2: dashboard host goes to Portal; apps are still routed directly.
+# Caddy: the only thing listening on port 80.
+#
+# It knows nothing about individual apps. For every request to
+# <something>.exp.lab it asks Portal two questions in one call
+# (forward_auth): "is this visitor allowed?" and "where does this
+# hostname live?". Apps are defined in data/apps.yaml, not here.
+
 {
+    # Plain HTTP for now: traffic only travels inside Tailscale, which is
+    # already encrypted. See README "Adding HTTPS later".
     auto_https off
+    # The admin API could reconfigure the proxy; nothing here needs it.
     admin off
+    # Listen only on these addresses (Tailscale IP + LAN IP), set by
+    # entrypoint.sh. Never 0.0.0.0, never the public IPv6 address.
     default_bind {$BIND_ADDRS}
 }
 
-http://focal.{$DOMAIN} {
-    reverse_proxy 127.0.0.1:8787
-}
-http://ritual.{$DOMAIN} {
-    reverse_proxy 127.0.0.1:8090
-}
-http://git.{$DOMAIN} {
-    reverse_proxy 127.0.0.1:3000
-}
-http://bot.{$DOMAIN} {
-    reverse_proxy 127.0.0.1:8080
-}
+# The dashboard and login page. Portal checks the session itself here.
 http://{$DOMAIN} {
+    # The forward-auth endpoint is for Caddy only, not for browsers.
+    @internal path /auth/*
+    respond @internal 404
+
     reverse_proxy 127.0.0.1:7080
 }
+
+# Every app.
+http://*.{$DOMAIN} {
+    # "route" runs these steps in exactly this order.
+    route {
+        # 1. Drop these headers if the client sent them. They are how
+        #    Portal talks to Caddy; a visitor must not be able to forge them.
+        request_header -X-Portal-Upstream
+        request_header -X-Portal-User
+
+        # 2. Ask Portal. Caddy sends the request's headers (not its body)
+        #    to /auth/verify.
+        #      2xx  -> continue below, with the listed response headers
+        #              copied onto the request
+        #      else -> send Portal's answer to the browser as is
+        #              (302 to the login page, 401, or 404 for unknown hosts)
+        forward_auth 127.0.0.1:7080 {
+            uri /auth/verify
+            copy_headers X-Portal-Upstream X-Portal-User
+        }
+
+        # 3. Proxy to the address Portal named, e.g. 127.0.0.1:8787.
+        reverse_proxy {http.request.header.X-Portal-Upstream} {
+            # Apps never see the Portal session cookie: remove it from
+            # the Cookie header and pass their own cookies through.
+            header_up Cookie "portal_session=[^;]*(; )?" ""
+        }
+    }
+}
+
+# Any other Host header (for example a bare IP address).
 http:// {
-    respond "unknown host" 404
+    respond "Unknown host. Try http://{$DOMAIN}/" 404
 }
