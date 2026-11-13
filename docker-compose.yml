@@ -78,7 +78,7 @@ services:
       # Optional: Claude Code's per-process session files, for each
       # session's working directory and idle/busy state (/proc/<pid>/cwd
       # is blocked by Docker's AppArmor profile). Only <pid>.json is read.
-      PORTAL_CLAUDE_SESSIONS: /host/claude-sessions
+      PORTAL_CLAUDE_SESSIONS: ""
     volumes:
       # portal.db + apps.yaml (back this up), backup/ (reads status.json,
       # writes requests/). The rest of ./data belongs to other services and
@@ -93,7 +93,11 @@ services:
       # memory contents: those need ptrace access, which Docker's AppArmor
       # profile and the missing capabilities refuse. No pid: host needed.
       - /proc:/host/proc:ro
-      - ~/.claude/sessions:/host/claude-sessions:ro
+      # Not mounted on purpose: ~/.claude/sessions also holds per-session .key
+      # files, which the login service has no business reading. To show each
+      # Claude session's folder in the Memory panel, add this line back and set
+      # PORTAL_CLAUDE_SESSIONS: /host/claude-sessions above.
+      #   - ~/.claude/sessions:/host/claude-sessions:ro
     # Other services' state inside ./data is masked with empty, read-only,
     # mode-000 tmpfs mounts: Portal cannot read ntfy's auth.db (admin hash,
     # tokens), VictoriaMetrics' or Alertmanager's files, even if Portal is
