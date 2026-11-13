@@ -27,7 +27,7 @@ job_main() {
 
   STEP="find latest snapshot"
   snap=$(restic snapshots --json --no-lock --host "$HOST_TAG" --latest 1 | jq -r 'sort_by(.time) | last | .id // empty')
-  [ -n "$snap" ] || die "the repository has no snapshot for host $HOST_TAG"
+  [[ $snap =~ ^[0-9a-f]{64}$ ]] || die "the repository has no snapshot for host $HOST_TAG"
 
   STEP="restore"
   mkdir -p "$TEST_ROOT"
@@ -72,6 +72,7 @@ job_main() {
 job_success() {
   local files detail
   files=$(cat "$WORK/tmp/restore-test.files")
+  is_uint "$files" || files=0
   detail=$(cat "$WORK/tmp/restore-test.detail")
   status_update --argjson t "$JOB_FINISHED" --argjson n "$files" --arg d "$detail" \
     '.last_restore_test = {time: $t, ok: true, files_checked: $n, detail: $d}'

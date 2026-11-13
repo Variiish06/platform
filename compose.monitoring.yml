@@ -117,9 +117,32 @@ services:
       # vm.exp.lab/vmalert/ shows vmalert's UI (rules, alert states)
       # through VictoriaMetrics, so vmalert needs no hostname of its own.
       - -vmalert.proxyURL=http://127.0.0.1:8880
+      # Read flags ALSO from environment variables (name = flag name with
+      # "." -> "_"). Used for the admin keys below, so the key is not in the
+      # process command line ("ps" shows every user's command lines).
+      - -envflag.enable
     environment:
       GOMEMLIMIT: 120MiB
       TZ: ${TZ:-UTC}
+      # Admin endpoints answer only with ?authKey=<VM_ADMIN_KEY> (.env).
+      # Without these, any local process (any container on the host
+      # network, any user on this machine) could DELETE all metrics
+      # (/api/v1/admin/tsdb/delete_series), fill the disk with snapshots,
+      # force merges, or read /flags and pprof. Deliberately NOT set:
+      # -metricsAuthKey (scrape.yml scrapes VM's own /metrics without a key),
+      # and nothing for queries, remote write/read (vmalert, Portal /graphs)
+      # or the UI (behind Caddy + Portal login).
+      deleteAuthKey: ${VM_ADMIN_KEY:?set VM_ADMIN_KEY in .env}
+      snapshotAuthKey: ${VM_ADMIN_KEY}
+      forceMergeAuthKey: ${VM_ADMIN_KEY}
+      forceFlushAuthKey: ${VM_ADMIN_KEY}
+      search_resetCacheAuthKey: ${VM_ADMIN_KEY}
+      reloadAuthKey: ${VM_ADMIN_KEY}
+      flagsAuthKey: ${VM_ADMIN_KEY}
+      pprofAuthKey: ${VM_ADMIN_KEY}
+      configAuthKey: ${VM_ADMIN_KEY}
+      logNewSeriesAuthKey: ${VM_ADMIN_KEY}
+      metricNamesStatsResetAuthKey: ${VM_ADMIN_KEY}
     volumes:
       - ./monitoring/scrape.yml:/etc/vm/scrape.yml:ro
       - ./data/vm:/storage                 # gitignored; NOT backed up (Phase C excludes it)

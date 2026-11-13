@@ -341,3 +341,19 @@ func TestRateLimiter(t *testing.T) {
 		t.Fatalf("cleanup left %d", n)
 	}
 }
+
+// Bare CRs in a message become "\n" (the browser's EventSource would read
+// them as line ends); titles lose every line break.
+func TestParseStreamNormalizesCR(t *testing.T) {
+	in := `{"id":"a","time":1,"event":"message","topic":"general","title":"t\r\nevent: x","message":"a\r\revent: backup\rdata: x\r\nb"}` + "\n"
+	got, err := parseStream(strings.NewReader(in))
+	if err != nil || len(got) != 1 {
+		t.Fatalf("parseStream: %v %v", got, err)
+	}
+	if got[0].Message != "a\n\nevent: backup\ndata: x\nb" {
+		t.Fatalf("message = %q", got[0].Message)
+	}
+	if got[0].Title != "t event: x" {
+		t.Fatalf("title = %q", got[0].Title)
+	}
+}

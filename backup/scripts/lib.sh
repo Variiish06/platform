@@ -36,6 +36,9 @@ HOST_TAG=experimentos                 # restic --host for every snapshot
 # Who owns the files we hand to the host (status.json, metrics, restores).
 OWNER_UID=${PUID:-1000}
 OWNER_GID=${PGID:-1000}
+# They end up in setpriv --reuid/--regid: digits only (never root by accident).
+[[ $OWNER_UID =~ ^[1-9][0-9]{0,9}$ && $OWNER_GID =~ ^[1-9][0-9]{0,9}$ ]] ||
+  { echo "PUID/PGID must be non-zero numbers" >&2; exit 1; }
 
 NTFY_URL=${NTFY_URL:-http://ntfy:80}
 NTFY_TOPIC=backups
@@ -87,10 +90,18 @@ die() { log "ERROR: $*"; exit 1; }
 # 1000 would need CAP_DAC_OVERRIDE, which we deliberately do NOT have. So
 # whatever must land in a uid-1000 directory is written BY uid 1000:
 #   as_ids UID GID command...   (setpriv needs CAP_SETUID + CAP_SETGID)
+#
+# The child gets a FRESH, minimal environment (env -i): our environment holds
+# RESTIC_PASSWORD, NTFY_TOKEN_BACKUP, RCLONE_CONFIG, DOCKER_HOST... and the
+# children (sqlite3, tar unpacking a snapshot, sh, rm) run as other uids and
+# do not need any of it. An allowlist, so a secret added later is covered too.
+AS_IDS_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 as_ids() {
   local uid=$1 gid=$2
   shift 2
-  setpriv --reuid="$uid" --regid="$gid" --clear-groups -- "$@"
+  [[ $uid =~ ^[0-9]{1,10}$ && $gid =~ ^[0-9]{1,10}$ ]] || die "as_ids: bad uid/gid '$uid' '$gid'"
+  env -i PATH="$AS_IDS_PATH" HOME=/nonexistent TMPDIR=/tmp TZ="${TZ:-UTC}" \
+    setpriv --reuid="$uid" --regid="$gid" --clear-groups -- "$@"
 }
 as_owner() { as_ids "$OWNER_UID" "$OWNER_GID" "$@"; }
 
@@ -237,14 +248,67 @@ status_default() {
           last_check: null, last_restore_test: null, last_staging_restore: null}'
 }
 
+# status.json is UNTRUSTED input: it lives in a directory that uid 1000 (and
+# the Portal container) can write. A value like "a[$(cmd)]" that reached
+# bash arithmetic ($(( )), (( )), [[ x -gt y ]]) would run cmd as root in
+# this container. So every read goes through this jq filter, which rebuilds
+# the object from the schema (PLAN-2.md): numbers stay non-negative integers
+# or become null, booleans stay booleans or become null, strings are
+# length-capped, snapshot ids must be hex, unknown keys are dropped. Since
+# status_update writes what status_read returns, a poisoned file is
+# normalised on the next write. Shell code still validates numbers again
+# (status_num) before any arithmetic: defence in depth.
+JQ_SANITIZE='
+  def num: if type == "number" and . >= 0 and . < 1e15 then floor else null end;
+  def str($n): if type == "string" then .[:$n] else "" end;
+  def bool: if type == "boolean" then . else null end;
+  def obj(f): if type == "object" then f else null end;
+  def sanitize: {
+    target: (.target | str(16)),
+    running: (.running | if IN("backup", "restore-staging", "check", "restore-test") then . else "" end),
+    last_run: (.last_run | obj({
+      started: (.started | num), finished: (.finished | num),
+      status: (.status | if IN("ok", "failed") then . else "failed" end),
+      duration_s: (.duration_s | num), bytes_added: (.bytes_added | num),
+      error: (.error | str(5000))})),
+    last_success: (.last_success | num),
+    snapshot_count: ((.snapshot_count | num) // 0),
+    repo_size_bytes: ((.repo_size_bytes | num) // 0),
+    snapshots: (.snapshots | if type == "array" then
+        [ .[] | objects | {id: (.id | if type == "string" and test("\\A[0-9a-f]{8,64}\\z") then . else null end),
+                           time: (.time | num)} | select(.id != null) ] | .[:10]
+      else [] end),
+    last_check: (.last_check | obj({time: (.time | num), ok: (.ok | bool)})),
+    last_restore_test: (.last_restore_test | obj({time: (.time | num), ok: (.ok | bool),
+      files_checked: (.files_checked | num), detail: (.detail | str(1000))})),
+    last_staging_restore: (.last_staging_restore | obj({time: (.time | num), ok: (.ok | bool),
+      snapshot: (.snapshot | str(64)), path: (.path | str(512)), detail: (.detail | str(1000))}))
+  };'
+
 # Current status: defaults overlaid with whatever the file has (so fields
-# we do not touch are preserved, e.g. last_success after a failed run).
+# we do not touch are preserved, e.g. last_success after a failed run),
+# then sanitised (see JQ_SANITIZE).
 status_read() {
-  if [ -s "$STATUS_FILE" ] && jq -e 'type == "object"' "$STATUS_FILE" >/dev/null 2>&1; then
-    jq -s '.[0] * .[1]' <(status_default) "$STATUS_FILE"
+  if [ -s "$STATUS_FILE" ] && head -c 1048576 "$STATUS_FILE" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    jq -s "$JQ_SANITIZE"' .[0] * .[1] | sanitize' <(status_default) <(head -c 1048576 "$STATUS_FILE")
   else
     status_default
   fi
+}
+
+# is_uint VALUE: a plain decimal number, no sign, no leading zeros (bash
+# would read 010 as octal), at most 18 digits. Use it on EVERY value that
+# comes from a file or a program before it reaches arithmetic.
+is_uint() { [[ ${1-} =~ ^(0|[1-9][0-9]{0,17})$ ]]; }
+
+# status_num JQ_PATH: prints the number at that path of status.json, or
+# NOTHING if it is missing or not a plain non-negative integer.
+#   last=$(status_num .last_success)
+status_num() {
+  local v
+  v=$(status_read | jq -r "($1) // empty" 2>/dev/null) || v=""
+  if is_uint "$v"; then printf '%s' "$v"; fi
+  return 0
 }
 
 # status_update [jq options...] FILTER
@@ -294,6 +358,7 @@ refresh_repo_info() {
   local snaps=$WORK/tmp/snapshots.json size
   restic snapshots --json --no-lock >"$snaps"
   size=$(restic stats --mode raw-data --json --no-lock | jq '.total_size')
+  is_uint "$size" || die "restic stats printed no usable total_size"
   status_update --slurpfile s "$snaps" --argjson z "$size" "$JQ_TS"'
     .snapshot_count = ($s[0] | length)
     | .repo_size_bytes = $z
@@ -308,27 +373,40 @@ refresh_repo_info() {
 # The token is passed to curl on stdin (--config -), not on the command
 # line, so it does not show up in "ps".
 notify() {
-  local prio=$1 title=$2 msg=$3 tags=${4:-floppy_disk}
+  local prio=$1 title=$2 msg=$3 tags=${4:-floppy_disk} body
   if [ -z "${NTFY_TOKEN_BACKUP:-}" ]; then
     log "ntfy: NTFY_TOKEN_BACKUP is empty, not sending '$title'"
     return 0
   fi
-  msg=$(printf '%s' "$msg" | head -c 3500)
+  # Headers: fixed values from our own scripts, but never let a CR/LF in.
+  [[ $prio =~ ^[1-5]$ ]] || prio=5
+  title=${title//[$'\r\n']/ }
+  tags=${tags//[^a-z0-9_,]/}
+  # The body goes through a file: "--data-binary <text>" would treat text
+  # that starts with "@" as a FILE NAME to upload.
+  body=$(mktemp /tmp/ntfy-body.XXXXXX) || { log "ntfy: no temp file, not sending '$title'"; return 0; }
+  printf '%s' "$msg" | head -c 3500 >"$body"
   if printf 'header = "Authorization: Bearer %s"\n' "$NTFY_TOKEN_BACKUP" |
     curl -fsS -m 15 --retry 2 -o /dev/null --config - \
       -H "Title: $title" -H "Priority: $prio" -H "Tags: $tags" \
-      --data-binary "$msg" "$NTFY_URL/$NTFY_TOPIC"; then
+      --data-binary "@$body" "$NTFY_URL/$NTFY_TOPIC"; then
     log "ntfy: sent '$title' (priority $prio)"
   else
     log "ntfy: could not publish '$title' (ignored)"
   fi
+  rm -f -- "$body"
   return 0
 }
 
 # "2026-11-13 03:00 IST" from unix seconds (container TZ is Asia/Kolkata).
-fmt_time() { if [ -n "${1:-}" ] && [ "$1" != null ]; then date -d "@$1" '+%Y-%m-%d %H:%M %Z'; else echo never; fi; }
-# 1536 -> "1.5 KiB"
-fmt_bytes() { awk -v b="${1:-0}" 'BEGIN{split("B KiB MiB GiB TiB",u," ");i=1;while(b>=1024&&i<5){b/=1024;i++};printf (i==1?"%d %s":"%.1f %s"),b,u[i]}'; }
+# Anything that is not a plain number (missing, null, garbage) is "never".
+fmt_time() { if is_uint "${1-}"; then date -d "@$1" '+%Y-%m-%d %H:%M %Z'; else echo never; fi; }
+# 1536 -> "1.5 KiB" (non-numbers count as 0)
+fmt_bytes() {
+  local b=${1-}
+  is_uint "$b" || b=0
+  awk -v b="$b" 'BEGIN{split("B KiB MiB GiB TiB",u," ");i=1;while(b>=1024&&i<5){b/=1024;i++};printf (i==1?"%d %s":"%.1f %s"),b,u[i]}'
+}
 
 # ---------------------------------------------------------------------------
 # Job runner: lock, "running" flag, log capture, success/failure handling

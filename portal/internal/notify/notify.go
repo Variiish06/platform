@@ -196,7 +196,7 @@ func parseStream(r io.Reader) ([]Message, error) {
 			prio = 3 // ntfy omits the field for the default priority
 		}
 		out = append(out, Message{ID: w.ID, Time: time.Unix(w.Time, 0), Topic: w.Topic,
-			Title: w.Title, Message: w.Message, Priority: prio, Tags: w.Tags})
+			Title: oneLine(w.Title), Message: normalizeNewlines(w.Message), Priority: prio, Tags: w.Tags})
 	}
 	return out, sc.Err()
 }
@@ -238,4 +238,17 @@ func sameIDs(a, b []Message) bool {
 		}
 	}
 	return true
+}
+
+// normalizeNewlines turns "\r\n" and lone "\r" into "\n". Messages come
+// from any token holder; a bare "\r" means nothing on the dashboard but is
+// a line break to the browser's EventSource (see server/hub.go formatEvent,
+// which also guards against it: defence in depth).
+func normalizeNewlines(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
+}
+
+// oneLine replaces any line break in a title with a space.
+func oneLine(s string) string {
+	return strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(s)
 }

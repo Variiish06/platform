@@ -24,8 +24,11 @@ HEARTBEAT=/tmp/watcher.heartbeat
 remove() { as_owner rm -f -- "$1" || log "could not remove $1"; }
 
 handle() {
-  local f=$1 base owner size content verdict snap
+  local f=$1 base owner size mtime content verdict snap
   base=${f##*/}
+  # The name is chosen by whoever wrote the file: only harmless characters
+  # reach the log (no newlines or terminal escapes to fake log lines).
+  base=${base//[^A-Za-z0-9._-]/?}
 
   if [ -L "$f" ]; then
     log "rejected $base: symlink (removed, not followed)"
@@ -36,17 +39,21 @@ handle() {
     log "ignored $base: not a regular file"
     return
   fi
-  owner=$(stat -c %u -- "$f")
+  owner=$(stat -c %u -- "$f") || return
   if [ "$owner" != "$OWNER_UID" ] && [ "$owner" != 0 ]; then
     log "rejected $base: owned by uid $owner (removed)"
     remove "$f"
     return
   fi
   # Give a writer that does not use rename() a moment to finish.
-  if [ $(($(date +%s) - $(stat -c %Y -- "$f"))) -lt 2 ]; then
+  # (stat prints digits; checked anyway before it reaches arithmetic)
+  mtime=$(stat -c %Y -- "$f") || return
+  is_uint "$mtime" || return
+  if [ $(($(date +%s) - mtime)) -lt 2 ]; then
     return
   fi
-  size=$(stat -c %s -- "$f")
+  size=$(stat -c %s -- "$f") || return
+  is_uint "$size" || return
   if [ "$size" -gt 1024 ]; then
     log "rejected $base: $size bytes (max 1024) (removed)"
     remove "$f"

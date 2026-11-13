@@ -106,7 +106,10 @@ services:
       # backup/drive-setup.sh rewrites this file IN PLACE (a file bind mount
       # follows the inode; replacing the file would hide the new one).
       - ./secrets/rclone.conf:/secrets/rclone.conf:ro
-      - ./run/backup-proxy:/run/backup-proxy   # docker-proxy-backup's socket
+      # docker-proxy-backup's socket. A named Docker volume (root-owned,
+      # under /var/lib/docker), NOT a directory in ~/platform/run: uid 1000
+      # must not be able to swap the socket or the directory under it.
+      - backup-proxy-sock:/run/backup-proxy
 
     depends_on: [docker-proxy-backup]
     healthcheck:
@@ -117,21 +120,35 @@ services:
       start_period: 15s
 
   # A second instance of the same socket proxy Portal uses, with a far
-  # narrower allowlist: the backup container may ONLY run commands
-  # ("exec") in the two Postgres containers (and inspect those two, which
-  # the docker CLI does first), read the exec's exit code, and ping. No listing, no inspecting, no creating/stopping containers;
+  # narrower allowlist: the backup container may ONLY create and start
+  # "exec"s in the two Postgres containers (and inspect those two, which
+  # the docker CLI does first), read an exec's exit code, and ping. No
+  # listing, no other containers, no creating/stopping containers;
   # everything else gets 403.
   #
-  # This is still powerful: exec runs as root INSIDE dalal-postgres-1 and
-  # conveyor-postgres-1, so whoever controls the backup container could do
-  # anything in those two containers (and their databases). Chosen anyway
-  # because pg_dump has to run next to the database: the alternative,
-  # joining the backup container to the dalal and conveyor networks and
-  # storing their database passwords here, couples this project to two
-  # other projects' private networks and secrets and breaks when they
-  # change. The exec allowlist is limited to two names and nothing else.
+  # Be clear about what this allowlist does NOT do: the proxy filters only
+  # the METHOD and PATH of a request, never its body. The body of an
+  # exec-create request chooses the command, the user and "Privileged":
+  # true. So whoever controls the backup container can run ANY command as
+  # root, privileged (all capabilities, all devices), inside
+  # dalal-postgres-1 and conveyor-postgres-1, and from a privileged process
+  # escaping to the host is easy. Treat a compromise of the backup
+  # container as equivalent to ROOT ON THE HOST. That is why the backup
+  # container has no listening ports, keeps only three capabilities,
+  # validates Portal's request files strictly (watcher.sh), and treats
+  # status.json and every other file/program output as untrusted input
+  # (lib.sh JQ_SANITIZE, status_num, is_uint).
+  #
+  # Chosen anyway because pg_dump has to run next to the database: the
+  # alternative, joining the backup container to the dalal and conveyor
+  # networks and storing their database passwords here, couples this
+  # project to two other projects' private networks and secrets and breaks
+  # when they change.
   docker-proxy-backup:
-    image: wollomatic/socket-proxy:1
+    # Pinned to the exact release AND image digest (same as docker-proxy in
+    # docker-compose.yml): this process holds the real Docker socket, so it
+    # only changes when we change it on purpose.
+    image: wollomatic/socket-proxy:1.13.2@sha256:ff95d6ff6c27853005ef85eb8f4ab5923dc3d2f1e055f98fb6aeeaceec3fe848
     restart: unless-stopped
     logging:
       driver: json-file
@@ -156,12 +173,13 @@ services:
     network_mode: none                    # no network at all: only the socket file
     # uid 0 (root without capabilities): the socket it creates is then owned
     # by root with mode 600, so ONLY the backup container (root) can use it.
-    # Portal also sees ./run (as uid 1000) and can therefore NOT connect.
+    # It lives in a named volume that only these two containers mount;
+    # nothing on the host side (uid 1000, Portal) can even see it.
     # (The real /var/run/docker.sock is root:docker, so root can open it.)
     user: "0:0"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./run/backup-proxy:/run/backup-proxy
+      - backup-proxy-sock:/run/backup-proxy
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -170,6 +188,7 @@ services:
 volumes:
   backup-staging:
   backup-work:
+  backup-proxy-sock:                    # docker-proxy-backup's unix socket
 
 networks:
   # Same declaration as in compose.notify.yml: same key, same name.

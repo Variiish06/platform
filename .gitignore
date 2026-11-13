@@ -6,6 +6,11 @@ data/*.db-*
 # The docker-socket-proxy's unix socket lives here.
 run/*
 !run/.gitkeep
+# run/portal/ (Portal's proxy socket) must exist, owned by you, before the
+# first start; only its placeholder is committed.
+!run/portal/
+run/portal/*
+!run/portal/.gitkeep
 # ntfy state: message cache and user database (holds token values)
 data/ntfy/
 # Secret files generated from .env (tokens, rclone config)

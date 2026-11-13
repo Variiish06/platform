@@ -73,8 +73,21 @@ services:
       # Graphs page + uptime bars: Portal queries VictoriaMetrics (Phase B).
       PORTAL_VM_URL: http://127.0.0.1:8428
     volumes:
-      - ./data:/data                    # portal.db + apps.yaml (back this up)
-      - ./run:/run/docker-proxy         # the proxy's socket, NOT the real Docker socket
+      # portal.db + apps.yaml (back this up), backup/ (reads status.json,
+      # writes requests/). The rest of ./data belongs to other services and
+      # is hidden below.
+      - ./data:/data
+      # Only Portal's own proxy socket, NOT the real Docker socket, and not
+      # the rest of ./run (node_exporter's textfile directory...).
+      - ./run/portal:/run/docker-proxy
+    # Other services' state inside ./data is masked with empty, read-only,
+    # mode-000 tmpfs mounts: Portal cannot read ntfy's auth.db (admin hash,
+    # tokens), VictoriaMetrics' or Alertmanager's files, even if Portal is
+    # compromised. (Docker mounts these AFTER ./data: deeper paths go last.)
+    tmpfs:
+      - /data/ntfy:ro,size=4k,mode=000
+      - /data/vm:ro,size=4k,mode=000
+      - /data/alertmanager:ro,size=4k,mode=000
     depends_on: [docker-proxy]
     healthcheck:
       test: ["CMD", "/portal", "healthcheck"]
@@ -86,13 +99,17 @@ services:
     security_opt: [no-new-privileges:true]
     mem_limit: 96m
 
-  # The only container that touches /var/run/docker.sock. It re-exports
-  # it as ./run/docker.sock and forwards nothing but the requests matched
+  # Portal's door to /var/run/docker.sock. It re-exports it as
+  # ./run/portal/docker.sock (a directory of its own, so Portal mounts
+  # nothing else from ./run) and forwards nothing but the requests matched
   # below: list and stats (GET) and restart (POST). Inspect, create, exec,
   # delete, images, volumes... are all refused with 403.
+  # (The backup container has its own proxy: compose.backup.yml.)
   docker-proxy:
     <<: *defaults
-    image: wollomatic/socket-proxy:1
+    # Pinned to the exact release AND image digest: this process holds the
+    # real Docker socket, so it only changes when we change it on purpose.
+    image: wollomatic/socket-proxy:1.13.2@sha256:ff95d6ff6c27853005ef85eb8f4ab5923dc3d2f1e055f98fb6aeeaceec3fe848
     command:
       - -loglevel=WARN
       - -proxysocketendpoint=/run/docker-proxy/docker.sock
@@ -102,7 +119,9 @@ services:
     user: "${PUID}:${DOCKER_GID}"       # docker group, so it may open the real socket
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./run:/run/docker-proxy
+      # Must exist and be owned by uid 1000 BEFORE the first start (it is in
+      # git as run/portal/.gitkeep); a directory Docker creates would be root's.
+      - ./run/portal:/run/docker-proxy
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]

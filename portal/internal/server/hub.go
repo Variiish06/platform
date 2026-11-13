@@ -27,7 +27,17 @@ func NewHub() *Hub {
 // formatEvent encodes one Server-Sent Event. The wire format is plain
 // text: an "event:" line, one "data:" line per line of payload, and a
 // blank line to finish.
+//
+// A browser's EventSource ends a line at "\r\n", "\n" OR a lone "\r". The
+// payload can carry text from outside (e.g. a notification message), so
+// every line ending is normalised to "\n" BEFORE splitting: otherwise a
+// "\r" inside the data would start a new line that the browser reads as a
+// field of its own ("event: ...", "data: ...", "id: ..."), i.e. a forged
+// event. The event name gets no line breaks at all.
 func formatEvent(event, data string) string {
+	event = strings.NewReplacer("\r", "", "\n", "").Replace(event)
+	data = strings.ReplaceAll(data, "\r\n", "\n")
+	data = strings.ReplaceAll(data, "\r", "\n")
 	var b strings.Builder
 	b.WriteString("event: ")
 	b.WriteString(event)

@@ -204,6 +204,7 @@ job_main() {
 job_success() {
   local added
   added=$(cat "$WORK/tmp/bytes_added" 2>/dev/null || echo 0)
+  is_uint "$added" || added=0 # restic output; goes into JSON and history.txt
   status_update --argjson s "$JOB_STARTED" --argjson f "$JOB_FINISHED" --argjson d "$JOB_DURATION" --argjson b "${added:-0}" '
     .last_run = {started: $s, finished: $f, status: "ok", duration_s: $d, bytes_added: $b, error: ""}
     | .last_success = $f'
@@ -221,7 +222,7 @@ job_failure() {
   status_update --argjson s "$JOB_STARTED" --argjson f "$JOB_FINISHED" --argjson d "$JOB_DURATION" --arg e "$JOB_ERROR" '
     .last_run = {started: $s, finished: $f, status: "failed", duration_s: $d, bytes_added: 0, error: $e}'
   notify 5 "Backup FAILED ($MODE)" "Backup on $HOST_TAG failed at $(fmt_time "$JOB_FINISHED").
-Last successful backup: $(fmt_time "$(status_read | jq -r '.last_success')").
+Last successful backup: $(fmt_time "$(status_num .last_success)").
 
 $JOB_ERROR
 
