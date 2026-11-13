@@ -8,7 +8,7 @@ Plan: `PLAN-2.md`. Resume from the first unchecked item.
 - [x] Phase B infra (commit f12fb21)
 - [x] Phase C infra (commit 3bf22db)
 - [x] Portal B+C (commit 8d3c50c)
-- [ ] Integration + Definition of Done verification  (IN PROGRESS; security review runs in parallel)
-- [ ] Security review (fable) + fixes
+- [x] Integration + DoD verification: all 11 items PASS
+- [ ] Security review (fable) done; fixes IN PROGRESS (A1 status.json injection, B1-B6 hardening)
 - [ ] Docs: README, LEARNING, DECISIONS, MORNING.md
 - [ ] Final commit
