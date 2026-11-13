@@ -72,6 +72,13 @@ services:
       PORTAL_NTFY_TOKEN: ${NTFY_TOKEN_PORTAL:-}
       # Graphs page + uptime bars: Portal queries VictoriaMetrics (Phase B).
       PORTAL_VM_URL: http://127.0.0.1:8428
+      # Memory panel ("what is taking the RAM"): the host's processes,
+      # read from the host's /proc mounted read-only below. Unset = off.
+      PORTAL_HOST_PROC: /host/proc
+      # Optional: Claude Code's per-process session files, for each
+      # session's working directory and idle/busy state (/proc/<pid>/cwd
+      # is blocked by Docker's AppArmor profile). Only <pid>.json is read.
+      PORTAL_CLAUDE_SESSIONS: /host/claude-sessions
     volumes:
       # portal.db + apps.yaml (back this up), backup/ (reads status.json,
       # writes requests/). The rest of ./data belongs to other services and
@@ -80,6 +87,13 @@ services:
       # Only Portal's own proxy socket, NOT the real Docker socket, and not
       # the rest of ./run (node_exporter's textfile directory...).
       - ./run/portal:/run/docker-proxy
+      # The host's /proc, read-only, for the Memory panel. This lets Portal
+      # see every host process's name, command line (shown redacted, see
+      # internal/procmem) and memory, but not their environment, files or
+      # memory contents: those need ptrace access, which Docker's AppArmor
+      # profile and the missing capabilities refuse. No pid: host needed.
+      - /proc:/host/proc:ro
+      - ~/.claude/sessions:/host/claude-sessions:ro
     # Other services' state inside ./data is masked with empty, read-only,
     # mode-000 tmpfs mounts: Portal cannot read ntfy's auth.db (admin hash,
     # tokens), VictoriaMetrics' or Alertmanager's files, even if Portal is

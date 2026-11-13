@@ -681,7 +681,7 @@ func TestBackupPanel(t *testing.T) {
 	for _, want := range []string{
 		"Local disk", "Backing up…", "The last backup failed.", "Failed · 59 min ago", "took 1 min 15 s", "2 KB added",
 		"&lt;script&gt;", "1.00 GB", "3 snapshots", "integrity passed", "failed · 12 files checked",
-		"~/restore-staging/20261112T0300Z-a1b2c3d4", "older than 26 h", `class="backup warn"`,
+		"~/restore-staging/20261112T0300Z-a1b2c3d4", "older than 26 h", `class="sec-b backup warn"`,
 		`<option value="a1b2c3d4e5f6">a1b2c3d4 · `, "disabled",
 	} {
 		if !strings.Contains(html, want) {
@@ -695,7 +695,7 @@ func TestBackupPanel(t *testing.T) {
 	s.apps = mustApps(t, s)
 	rec := do(s.routes(), "GET", "/", token, "", "")
 	page := rec.Body.String()
-	for _, want := range []string{`id="backup"`, `id="restore-dialog"`, `class="upbar"`, `href="/graphs"`, "never touches live data"} {
+	for _, want := range []string{`id="backup"`, `id="restore-dialog"`, `class="days"`, `href="/graphs"`, "never touches live data"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("dashboard lacks %s", want)
 		}

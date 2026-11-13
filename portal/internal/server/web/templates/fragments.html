@@ -1,143 +1,178 @@
 {{/* These blocks are rendered twice: inside the full page on first
      load, and on their own whenever data changes, to be pushed to open
-     dashboards over the event stream. One template, two uses. */}}
+     dashboards over the event stream. One template, two uses. Everything
+     is escaped by html/template; widths travel as data-pct and are set by
+     app.js (the CSP forbids inline styles). */}}
+
+{{define "status"}}{{range $i, $p := .Parts}}{{if $i}}<span class="sep" aria-hidden="true">·</span>{{end}}<span{{if $p.Level}} data-level="{{$p.Level}}"{{end}}>{{if $p.Level}}<i class="mark" aria-hidden="true"></i>{{end}}{{$p.Text}}</span>{{end}}{{end}}
 
 {{define "apps"}}
-<div class="sec-head">
-  <h2>Apps</h2>
-  <span class="count{{if lt .Up .Total}} warn{{end}}">{{.Up}} of {{.Total}} up</span>
-</div>
+<header class="sec-h"><h2 id="h-apps">Apps</h2><span class="meta">{{.Up}}/{{.Total}} up</span></header>
+<div class="sec-b">
 {{if .ConfigError}}<p class="banner" role="alert"><strong>apps.yaml has an error, so the last good version is still in use.</strong> {{.ConfigError}}</p>{{end}}
 {{if .Tiles}}
-<div class="tiles">
+<table class="t apps-t">
+  <thead><tr>
+    <th scope="col">App</th><th scope="col">What</th><th scope="col">State</th>
+    <th scope="col" class="num">Response</th><th scope="col">Last 30 days</th><th scope="col" class="num">Uptime</th>
+  </tr></thead>
+  <tbody>
   {{range .Tiles}}
-  <a class="tile" href="{{.URL}}" data-state="{{.State}}">
-    <span class="tile-top">
-      <span class="tile-ico"><svg class="ico"><use href="#{{icon .Icon}}"/></svg></span>
-      <svg class="ico tile-go"><use href="#i-arrow"/></svg>
-    </span>
-    <span class="tile-name">{{.Name}}</span>
-    <span class="tile-desc">{{if .Desc}}{{.Desc}}{{else}}{{.Host}}{{end}}</span>
-    <span class="tile-foot">
-      <span class="status" data-state="{{.State}}"><i class="dot"></i>{{.Detail}}</span>
-      {{/* 30 daily segments, oldest left. Colours are CSS classes (the CSP
-           forbids inline styles); the title on each segment is the
-           tooltip; role=img + aria-label is the screen-reader version. */}}
-      {{with .Uptime}}
-      <span class="uptime">
-        <span class="upbar" role="img" aria-label="{{.Aria}}">{{range .Segs}}<i class="{{.Level}}" title="{{.Title}}"></i>{{end}}</span>
-        <span class="up-label" data-level="{{.Level}}" aria-hidden="true">{{.Label}}</span>
-      </span>
-      {{end}}
-    </span>
-  </a>
+  <tr data-state="{{.State}}">
+    <th scope="row" class="name"><a href="{{.URL}}">{{.Name}}</a>{{if .Open}}<span class="ext" title="No Portal login in front of it">public</span>{{end}}</th>
+    <td class="desc">{{if .Desc}}{{.Desc}}{{else}}{{.Host}}{{end}}</td>
+    <td class="state">{{if eq .State "down"}}<span data-level="bad"><i class="mark" aria-hidden="true"></i>down · {{.Detail}}</span>{{else if eq .State "unknown"}}<span class="faint">{{.Detail}}</span>{{end}}</td>
+    <td class="num lat mono">{{.Latency}}</td>
+    {{/* 30 daily segments, oldest left; the title is the tooltip, the
+         aria-label the screen-reader version. */}}
+    <td class="strip30">{{with .Uptime}}<span class="days" role="img" aria-label="{{.Aria}}">{{range .Segs}}<i class="{{.Level}}" title="{{.Title}}"></i>{{end}}</span>{{end}}</td>
+    <td class="num upct mono">{{with .Uptime}}<span{{if or (eq .Level "warn") (eq .Level "bad")}} data-level="{{.Level}}"{{end}} title="{{.Label}}">{{.Pct}}</span>{{end}}</td>
+  </tr>
   {{end}}
-</div>
+  </tbody>
+</table>
+<p class="mfoot"><span>Health-checked every 30 s</span>{{if .Span}}<span>uptime covers {{.Span}}</span>{{end}}</p>
 {{else}}
 <p class="empty">No apps yet. Add one to <span class="mono">data/apps.yaml</span> and it appears here within 30 seconds.</p>
 {{end}}
+</div>
 {{end}}
 
 {{define "stats"}}
-{{range .}}
-<div class="stat" data-key="{{.Key}}" data-state="{{.State}}">
-  <span class="stat-label">{{.Label}}</span>
-  <span class="stat-value" data-f="v">{{.Value}}</span>
-  <span class="stat-sub" data-f="s">{{.Sub}}</span>
-  {{if eq .Key "cpu"}}<svg class="spark" viewBox="0 0 120 36" preserveAspectRatio="none" aria-hidden="true" data-hist="{{.Hist}}"><polyline points=""/></svg>{{end}}
-  <span class="bar{{if lt .Pct 0.0}} none{{end}}"><i data-pct="{{printf "%.1f" .Pct}}"></i></span>
+{{range .}}{{if ne .Key "uptime"}}
+<div class="rd" data-key="{{.Key}}" data-state="{{.State}}">
+  <span class="rd-l">{{.Label}}</span>
+  <span class="rd-v" data-f="v">{{.Value}}</span>
+  <span class="rd-s" data-f="s">{{.Sub}}</span>
+  {{if eq .Key "cpu"}}<svg class="spark" viewBox="0 0 120 18" preserveAspectRatio="none" aria-hidden="true" data-hist="{{.Hist}}"><polyline points=""/></svg>
+  {{else}}<span class="meter{{if lt .Pct 0.0}} none{{end}}" aria-hidden="true"><i data-pct="{{printf "%.1f" .Pct}}"></i></span>{{end}}
 </div>
+{{end}}{{end}}
 {{end}}
+
+{{/* Memory: what holds the RAM. Groups sum to MemTotal. */}}
+{{define "memory"}}
+<header class="sec-h"><h2 id="h-mem">Memory</h2><span class="meta">{{.Total}}</span></header>
+<div class="sec-b">
+{{if eq .State "off"}}
+<p class="empty">Off: Portal has no view of the host's processes. Mount the host's /proc and set <span class="mono">PORTAL_HOST_PROC</span> (see docker-compose.yml).</p>
+{{else if eq .State "loading"}}
+<p class="empty">Reading the host's processes…</p>
+{{else if eq .State "error"}}
+<p class="banner" role="alert">{{.Error}}</p>
+{{else}}
+{{if .Error}}<p class="banner warn" role="alert">{{.Error}} Showing the last good scan.</p>{{end}}
+<p class="verdict">{{.Verdict}}</p>
+<div class="mbar" role="img" aria-label="{{.Aria}}">{{range .Segs}}<i class="mk-{{.Key}}" data-pct="{{.Pct}}" title="{{.Label}}: {{.Bytes}}"></i>{{end}}</div>
+<div class="mscale" aria-hidden="true"><span>0</span><span>{{.Total}}</span></div>
+<div class="mrow head" aria-hidden="true"><span></span><span>Group</span><span class="cnt"></span><span class="num">Resident</span><span class="num">Share</span></div>
+{{range .Groups}}
+<details class="mgroup" data-k="mem-{{.Key}}">
+  <summary class="mrow"><i class="mk mk-{{.Key}}" aria-hidden="true"></i><span class="lbl">{{.Label}}</span><span class="cnt">{{.Count}}{{if .Swap}} · {{.Swap}} swapped{{end}}</span><span class="num">{{.Bytes}}</span><span class="num">{{.Pct}}</span></summary>
+  <div class="mbody">
+    <p class="note">{{.Note}}</p>
+    {{range .Projects}}
+    <div class="msub proj"><span class="lbl">{{.Name}}</span><span class="cnt"></span><span class="num">{{.Bytes}}</span><span class="num">{{.Pct}}</span></div>
+    {{range .Rows}}<div class="msub child"><span class="lbl"><span class="mono">{{.Label}}</span></span><span class="cnt">{{.Sub}}{{if .Swap}} · {{.Swap}} swapped{{end}}</span><span class="num">{{.Bytes}}</span><span class="num">{{.Pct}}</span></div>{{end}}
+    {{end}}
+    {{range .Sessions}}
+    <div class="msub"><span class="lbl"><span class="mono">{{.Where}}</span>{{if .Status}} <span class="{{if eq .Status "idle"}}dim{{else}}faint{{end}}">{{.Status}}</span>{{end}}<span class="args">{{if .Name}}{{.Name}} · {{end}}{{.Args}}</span></span><span class="cnt">{{if .Age}}<time data-ts="{{.TS}}" title="started {{.Started}}, pid {{.PID}}">{{.Age}}</time> · {{end}}{{.Procs}} proc{{if .Swap}} · {{.Swap}} swapped{{end}}</span><span class="num">{{.Bytes}}</span><span class="num">{{.Pct}}</span></div>
+    {{end}}
+    {{if eq .Key "claude"}}<p class="hint">Idle sessions can be stopped from a terminal: <code>cs stop --idle</code></p>{{end}}
+    {{range .Rows}}<div class="msub"><span class="lbl"><span class="mono">{{.Label}}</span>{{if .Sub}}<span class="args">{{.Sub}}</span>{{end}}</span><span class="cnt">{{if .PID}}pid {{.PID}}{{end}}{{if .Swap}} · {{.Swap}} swapped{{end}}</span><span class="num">{{.Bytes}}</span><span class="num">{{.Pct}}</span></div>{{end}}
+  </div>
+</details>
+{{end}}
+<p class="mfoot">{{if .Swap}}<span>{{.Swap}}</span>{{end}}<span>Per process: resident memory without file-backed pages, which count as page cache</span><span>{{.Took}}</span></p>
+{{end}}
+</div>
 {{end}}
 
 {{define "containers"}}
-<div class="sec-head">
-  <h2>Containers</h2>
-  <span class="count">{{.Running}} of {{.Total}} running</span>
-</div>
+<header class="sec-h"><h2 id="h-ct">Containers</h2><span class="meta">{{.Running}}/{{.Total}} running</span></header>
+<div class="sec-b">
 {{if .Error}}
 <p class="banner" role="alert">{{.Error}}</p>
 {{else if .Rows}}
-<ul class="rows">
+<table class="t ct-t">
+  <thead><tr>
+    <th scope="col"><button class="sort" type="button" data-sort="name">Name</button></th>
+    <th scope="col"><button class="sort" type="button" data-sort="project">Project</button></th>
+    <th scope="col">Up</th>
+    <th scope="col" class="num"><button class="sort" type="button" data-sort="cpu">CPU</button></th>
+    <th scope="col" class="num"><button class="sort" type="button" data-sort="mem">Memory</button></th>
+    <th scope="col"><span class="visually-hidden">Action</span></th>
+  </tr></thead>
+  <tbody>
   {{range .Rows}}
-  <li class="row" data-id="{{.ID}}" data-state="{{.State}}">
-    <i class="dot" data-state="{{if .Running}}up{{else}}off{{end}}"></i>
-    <span class="row-main">
-      <span class="row-name">{{.Name}}</span>
-      <span class="row-status">{{.Status}}</span>
-    </span>
-    <span class="row-mem">{{.Mem}}{{if .CPU}}<span class="row-cpu" title="CPU, 100% = one core">{{.CPU}}</span>{{end}}</span>
-    <button class="icon-btn" type="button" data-restart="{{.ID}}" data-name="{{.Name}}" data-running="{{.Running}}"
-            aria-label="{{if .Running}}Restart{{else}}Start{{end}} {{.Name}}" title="{{if .Running}}Restart{{else}}Start{{end}}">
-      <svg class="ico"><use href="#{{if .Running}}i-restart{{else}}i-play{{end}}"/></svg>
-    </button>
-  </li>
+  <tr data-id="{{.ID}}" data-name="{{.Name}}" data-project="{{.Project}}" data-cpu="{{.CPUVal}}" data-mem="{{.MemBytes}}" data-run="{{.Running}}"{{if not .Running}} class="off"{{end}}>
+    <th scope="row" class="name">{{.Name}}</th>
+    <td class="proj">{{.Project}}</td>
+    <td class="up" title="{{.Status}}">{{.Uptime}}{{if .Health}}<span class="health" data-level="{{if eq .Health "unhealthy"}}bad{{else}}warn{{end}}">{{.Health}}</span>{{end}}</td>
+    <td class="num cpu mono">{{if .Running}}{{if .CPU}}{{.CPU}}{{else}}…{{end}}{{end}}</td>
+    <td class="num memc mono">{{if .Running}}{{.Mem}}<span class="mem-bar" aria-hidden="true"><i data-pct="{{.MemPct}}"></i></span>{{end}}</td>
+    <td class="act"><button class="btn sm" type="button" data-restart="{{.ID}}" data-name="{{.Name}}" data-running="{{.Running}}" aria-label="{{if .Running}}Restart{{else}}Start{{end}} {{.Name}}">{{if .Running}}Restart{{else}}Start{{end}}</button></td>
+  </tr>
   {{end}}
-</ul>
+  </tbody>
+</table>
+<p class="mfoot"><span>{{.Projects}} projects</span><span>{{.MemTotal}} as <span class="mono">docker stats</span> counts it (includes active page cache)</span></p>
 {{else}}
 <p class="empty">No containers found.</p>
 {{end}}
+</div>
 {{end}}
 
 {{/* Notifications. Message text comes from other services: html/template
      escapes every value here, so it can never become markup. */}}
+{{define "note"}}
+<li data-prio="{{.Prio}}">
+  <time datetime="{{.ISO}}" data-ts="{{.TS}}" title="{{.At}}">{{.Ago}}</time>
+  <span class="topic">{{.Topic}}</span>
+  <span class="msg" title="{{.Full}}">{{if or (eq .Prio "high") (eq .Prio "urgent")}}<span class="pr">{{.Prio}}</span>{{end}}{{if .Title}}<b>{{.Title}}</b> — {{end}}{{.Message}}</span>
+</li>
+{{end}}
+
 {{define "notify"}}
-<div class="sec-head">
-  <h2>Notifications</h2>
-  <span class="count">{{if eq .State "off"}}off{{else if eq .State "down"}}<span class="warn">ntfy not reachable</span>{{else}}last {{len .Items}} · <a class="link" href="http://ntfy.exp.lab/">ntfy.exp.lab</a>{{end}}</span>
-</div>
+<header class="sec-h"><h2 id="h-nt">Notifications</h2><span class="meta">{{if eq .State "off"}}off{{else if eq .State "down"}}<span data-level="warn">unreachable</span>{{else}}{{len .Items}} in 7 days{{end}}</span></header>
+<div class="sec-b">
 {{if eq .State "off"}}
-<p class="banner" role="status"><strong>ntfy not reachable.</strong> Notifications are not set up in Portal: {{.Error}}</p>
+<p class="banner warn" role="status"><strong>ntfy not reachable.</strong> Notifications are not set up in Portal: {{.Error}}</p>
 {{else if eq .State "down"}}
-<p class="banner" role="alert"><strong>ntfy not reachable.</strong> {{.Error}}.{{if .Items}} Showing the last messages received.{{end}}</p>
+<p class="banner warn" role="alert"><strong>ntfy not reachable.</strong> {{.Error}}.{{if .Items}} Showing the last messages received.{{end}}</p>
 {{end}}
 {{if .Items}}
-<ul class="rows notes">
-  {{range .Items}}
-  <li class="note" data-prio="{{.Prio}}">
-    <span class="note-head">
-      <span class="chip">{{.Topic}}</span>
-      {{if .Title}}<span class="note-title">{{.Title}}</span>{{end}}
-      <time class="note-time" datetime="{{.ISO}}" data-ts="{{.TS}}" title="{{.At}}">{{.Ago}}</time>
-    </span>
-    <span class="note-msg" title="{{.Full}}">{{.Message}}</span>
-    {{if .Tags}}<span class="note-tags">{{.Tags}}</span>{{end}}
-  </li>
-  {{end}}
-</ul>
+<ol class="log">{{range .Recent}}{{template "note" .}}{{end}}</ol>
+{{with .Older}}<details class="older" data-k="notify-older"><summary>{{len .}} older</summary><ol class="log">{{range .}}{{template "note" .}}{{end}}</ol></details>{{end}}
 {{else if eq .State "ok"}}
 <p class="empty">No notifications in the last 7 days. Send one: see <span class="mono">NOTIFY.md</span>.</p>
 {{end}}
+<p class="mfoot"><span>From <a class="lnk" href="http://ntfy.exp.lab/">ntfy.exp.lab</a></span></p>
+</div>
 {{end}}
 
 {{/* Backups. status.json is written by the backup container; every value
      is treated as untrusted text and escaped by html/template. */}}
 {{define "backup"}}
-<div class="sec-head">
-  <h2>Backups</h2>
-  <span class="count">{{if .Target}}{{.Target}}{{else if eq .State "none"}}not set up yet{{end}}</span>
-</div>
-<div class="backup{{if .Warn}} warn{{end}}" data-state="{{.State}}">
+<header class="sec-h"><h2 id="h-bk">Backups</h2><span class="meta">{{if .Target}}{{.Target}}{{else if eq .State "none"}}not set up{{end}}</span></header>
+<div class="sec-b backup{{if .Warn}} warn{{end}}" data-state="{{.State}}">
   {{if .Running}}
-  <p class="bk-line running" role="status"><i class="pulse" aria-hidden="true"></i>{{.Running}}…</p>
+  <p class="bk-run" role="status">{{.Running}}…</p>
   {{else if .Pending}}
-  <p class="bk-line running" role="status"><i class="pulse" aria-hidden="true"></i>Requested {{.PendingAgo}} · waiting for the backup service to pick it up…</p>
+  <p class="bk-run" role="status">Requested {{.PendingAgo}} · waiting for the backup service to pick it up…</p>
   {{end}}
   {{if eq .State "error"}}
   <p class="banner" role="alert">{{.Error}}</p>
   {{else if eq .State "none"}}
   <p class="bk-head">{{.Headline}}</p>
-  <p class="bk-sub">The backup service writes its status to <span class="mono">data/backup/status.json</span>; it appears here as soon as it exists.</p>
+  <p class="note">The backup service writes its status to <span class="mono">data/backup/status.json</span>; it appears here as soon as it exists.</p>
   {{else}}
-  <p class="bk-head" {{if .Warn}}role="alert"{{end}}>{{.Headline}}</p>
+  <p class="bk-head"{{if .Warn}} role="alert" data-level="{{.SummaryLevel}}"{{end}}>{{if .Warn}}<i class="mark" aria-hidden="true"></i>{{end}}{{.Headline}}</p>
   <dl class="kv">
     {{range .Rows}}
     <div class="kv-row" data-state="{{.State}}">
       <dt>{{.Label}}</dt>
-      <dd>
-        <span class="kv-v">{{if .TS}}<time data-ts="{{.TS}}" title="{{.Abs}}">{{.Value}}</time>{{else}}{{.Value}}{{end}}</span>
-        {{if .Sub}}<span class="kv-s"{{if .SubFull}} title="{{.SubFull}}"{{end}}>{{.Sub}}</span>{{end}}
-      </dd>
+      <dd><span class="kv-v">{{if .TS}}<time data-ts="{{.TS}}" title="{{.Abs}}">{{.Value}}</time>{{else}}{{.Value}}{{end}}</span>{{if .Sub}}<span class="kv-s"{{if .SubFull}} title="{{.SubFull}}"{{end}}>{{.Sub}}</span>{{end}}</dd>
     </div>
     {{end}}
   </dl>

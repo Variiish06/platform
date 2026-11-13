@@ -33,6 +33,9 @@ type Container struct {
 	Image  string
 	State  string // running, exited, restarting, paused, created, dead
 	Status string // human text from Docker: "Up 2 days (healthy)"
+	// Project is the compose project (label com.docker.compose.project),
+	// "" for containers started without compose.
+	Project string
 
 	// Filled in by the stats collector (see stats.go), running containers only.
 	MemBytes   uint64  // 0 when not running or unknown
@@ -62,7 +65,7 @@ func New(socketPath string) *Client {
 			// keep that many connections around between rounds.
 			MaxIdleConns:        statsWorkers,
 			MaxIdleConnsPerHost: statsWorkers,
-			IdleConnTimeout: 30 * time.Second,
+			IdleConnTimeout:     30 * time.Second,
 		},
 	}}
 }
@@ -101,6 +104,7 @@ func (c *Client) List(ctx context.Context) ([]Container, error) {
 		Image  string
 		State  string
 		Status string
+		Labels map[string]string
 	}
 	if err := c.do(ctx, http.MethodGet, "/containers/json?all=1", &raw); err != nil {
 		return nil, err
@@ -114,7 +118,8 @@ func (c *Client) List(ctx context.Context) ([]Container, error) {
 		if len(r.Names) > 0 {
 			name = strings.TrimPrefix(r.Names[0], "/")
 		}
-		out = append(out, Container{ID: r.ID, Name: name, Image: r.Image, State: r.State, Status: r.Status})
+		out = append(out, Container{ID: r.ID, Name: name, Image: r.Image, State: r.State, Status: r.Status,
+			Project: r.Labels["com.docker.compose.project"]})
 	}
 	sort.SliceStable(out, func(a, b int) bool {
 		if out[a].Running() != out[b].Running() {

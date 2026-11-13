@@ -48,16 +48,19 @@ type snapOption struct {
 }
 
 type backupData struct {
-	State    string // "none" (no status.json), "error" (unreadable), "ok"
-	Error    string
-	Target   string
-	Running  string // "" or a human description of what runs now
-	Pending  bool   // a request file is waiting for the backup container
+	State      string // "none" (no status.json), "error" (unreadable), "ok"
+	Error      string
+	Target     string
+	Running    string // "" or a human description of what runs now
+	Pending    bool   // a request file is waiting for the backup container
 	PendingAgo string
-	Warn     bool   // stale or failed: the panel turns amber/red
-	Headline string // one line under the title
-	Rows     []kv
-	Snaps    []snapOption
+	Warn       bool   // stale or failed: the panel turns amber/red
+	Headline   string // one line under the title
+	// Summary is the backup clause of the status sentence ("last backup
+	// 2 h ago", "backup failed 01:20"); SummaryLevel is "", "warn", "bad".
+	Summary, SummaryLevel string
+	Rows                  []kv
+	Snaps                 []snapOption
 }
 
 func targetName(t string) string {
@@ -151,10 +154,12 @@ func buildBackup(st backup.Status, readErr error, pending bool, pendingAt, now t
 	switch {
 	case errors.Is(readErr, backup.ErrNoStatus):
 		d.State, d.Headline = "none", "No backup has run yet."
+		d.Summary, d.SummaryLevel = "no backup has run yet", "warn"
 		return d
 	case readErr != nil:
 		d.State, d.Warn = "error", true
 		d.Error = "status.json could not be read: " + readErr.Error()
+		d.Summary, d.SummaryLevel = "backup status unreadable", "bad"
 		return d
 	}
 	d.Target = targetName(st.Target)
@@ -189,11 +194,13 @@ func buildBackup(st backup.Status, readErr error, pending bool, pendingAt, now t
 
 	// Last run.
 	failed := false
+	var failedAt time.Time
 	if r := st.LastRun; r != nil {
 		when := r.Finished
 		if when.IsZero() {
 			when = r.Started
 		}
+		failedAt = when
 		state, word := "", "unknown"
 		switch r.Status {
 		case "ok":
@@ -288,6 +295,27 @@ func buildBackup(st backup.Status, readErr error, pending bool, pendingAt, now t
 	default:
 		d.Headline = "Backups are up to date."
 	}
+	switch {
+	case failed:
+		d.Summary, d.SummaryLevel = "backup failed", "bad"
+		if !failedAt.IsZero() {
+			d.Summary += " " + failedAt.Local().Format("15:04")
+			if now.Sub(failedAt) > 20*time.Hour {
+				d.Summary = "backup failed " + failedAt.Local().Format("2 Jan 15:04")
+			}
+		}
+	case stale && st.LastSuccess.IsZero():
+		d.Summary, d.SummaryLevel = "no successful backup yet", "warn"
+	case stale:
+		d.Summary, d.SummaryLevel = "last good backup "+ago(st.LastSuccess, now), "warn"
+	case neverRan:
+		d.Summary, d.SummaryLevel = "no backup has run yet", "warn"
+	default:
+		d.Summary = "last backup " + ago(st.LastSuccess, now)
+	}
+	if d.Running != "" {
+		d.Summary = strings.ToLower(d.Running[:1]) + d.Running[1:] + " now · " + d.Summary
+	}
 	return d
 }
 
@@ -315,6 +343,7 @@ func (s *Server) backupView() backupData {
 
 func (s *Server) publishBackup() {
 	s.hub.Publish("backup", strings.TrimSpace(s.fragment("backup", s.backupView())))
+	s.publishStatus()
 }
 
 // ---- POST /api/backup/run and /api/backup/restore-staging ----

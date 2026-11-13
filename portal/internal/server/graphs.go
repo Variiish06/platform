@@ -35,11 +35,11 @@ type graphRange struct {
 }
 
 var graphRanges = map[string]graphRange{
-	"1h":  {time.Hour, 10 * time.Second},           // 360 points
-	"6h":  {6 * time.Hour, time.Minute},            // 360
-	"24h": {24 * time.Hour, 4 * time.Minute},       // 360
-	"7d":  {7 * 24 * time.Hour, 30 * time.Minute},  // 336
-	"30d": {30 * 24 * time.Hour, 2 * time.Hour},    // 360
+	"1h":  {time.Hour, 10 * time.Second},          // 360 points
+	"6h":  {6 * time.Hour, time.Minute},           // 360
+	"24h": {24 * time.Hour, 4 * time.Minute},      // 360
+	"7d":  {7 * 24 * time.Hour, 30 * time.Minute}, // 336
+	"30d": {30 * 24 * time.Hour, 2 * time.Hour},   // 360
 }
 
 // graphRangeOrder is the order of the buttons on the page.
@@ -62,6 +62,12 @@ type graphDef struct {
 	Desc              string
 	Queries           []graphQuery
 	TopN              int // keep only the N series with the highest latest value
+	// Stacked draws filled areas on top of each other (the series are
+	// parts of one whole). Order fixes the series order by label value,
+	// bottom first; Names gives each value its legend text.
+	Stacked bool
+	Order   []string
+	Names   map[string]string
 }
 
 // graphDefs is the allowlist, in page order. Metric names: node_exporter
@@ -82,6 +88,11 @@ var graphDefs = []graphDef{
 		Queries: []graphQuery{
 			{Label: "Used", Expr: `max(node_memory_MemTotal_bytes) - max(node_memory_MemAvailable_bytes)`},
 			{Label: "Total", Expr: `max(node_memory_MemTotal_bytes)`}}},
+	{Name: "memory_groups", Title: "Memory by group", Unit: "bytes", Desc: "What holds the RAM (Portal's host scan)", Stacked: true,
+		Queries: []graphQuery{{Expr: `max by (group) (portal_memory_group_bytes{group!="unaccounted"})`, LabelFrom: "group"}},
+		Order:   []string{"containers", "claude", "docker_engine", "user", "system", "kernel", "cache", "free"},
+		Names: map[string]string{"containers": "Containers", "claude": "Claude Code", "docker_engine": "Docker engine",
+			"user": "User processes", "system": "System services", "kernel": "Kernel", "cache": "Page cache", "free": "Free"}},
 	{Name: "disk", Title: "Disk used", Unit: "percent", Desc: "Root filesystem /",
 		Queries: []graphQuery{{Label: "/", Expr: `100 * (1 - max(node_filesystem_avail_bytes{mountpoint="/"}) / max(node_filesystem_size_bytes{mountpoint="/"}))`}}},
 	{Name: "temperature", Title: "CPU temperature", Unit: "celsius", Desc: "coretemp package sensor",
@@ -193,13 +204,14 @@ type graphSeries struct {
 // graphResult is the JSON answer, shaped for uPlot: data[0] is the shared
 // x axis (unix seconds), data[i] the values of series[i-1], null = gap.
 type graphResult struct {
-	Name   string        `json:"name"`
-	Title  string        `json:"title"`
-	Unit   string        `json:"unit"`
-	Range  string        `json:"range"`
-	Step   int64         `json:"step"`
-	Series []graphSeries `json:"series"`
-	Data   []json.RawMessage `json:"data"`
+	Name    string            `json:"name"`
+	Title   string            `json:"title"`
+	Unit    string            `json:"unit"`
+	Range   string            `json:"range"`
+	Stacked bool              `json:"stacked,omitempty"`
+	Step    int64             `json:"step"`
+	Series  []graphSeries     `json:"series"`
+	Data    []json.RawMessage `json:"data"`
 }
 
 // alignedSeries is one line on the shared time grid.
@@ -310,11 +322,30 @@ func runGraph(ctx context.Context, vm *metricsdb.Client, def *graphDef, rangeNam
 	if def.TopN > 0 {
 		lines = topN(lines, def.TopN)
 	}
+	if len(def.Order) > 0 {
+		rank := map[string]int{}
+		for i, k := range def.Order {
+			rank[k] = i + 1
+		}
+		kept := lines[:0]
+		for _, l := range lines {
+			if rank[l.label] > 0 {
+				kept = append(kept, l)
+			}
+		}
+		lines = kept
+		sort.SliceStable(lines, func(i, j int) bool { return rank[lines[i].label] < rank[lines[j].label] })
+	}
+	for i := range lines {
+		if n, ok := def.Names[lines[i].label]; ok {
+			lines[i].label = n
+		}
+	}
 	if len(lines) > graphMaxSeries {
 		lines = lines[:graphMaxSeries]
 	}
 
-	out := graphResult{Name: def.Name, Title: def.Title, Unit: def.Unit, Range: rangeName,
+	out := graphResult{Name: def.Name, Title: def.Title, Unit: def.Unit, Range: rangeName, Stacked: def.Stacked,
 		Step: int64(rg.Step.Seconds()), Series: []graphSeries{}}
 	ts := make([]float64, n)
 	for i := range ts {
@@ -385,13 +416,16 @@ func (s *Server) handleGraphData(w http.ResponseWriter, r *http.Request) {
 
 type graphPanel struct {
 	Name, Title, Unit, Desc string
+	Stacked                 bool
 }
 
 type graphsPage struct {
-	V, Host, User string
-	Panels        []graphPanel
-	Ranges        []string
-	VMState       string // "ok", "down", "off", "unknown"
+	V, User string
+	Page    string
+	Header  headerData
+	Panels  []graphPanel
+	Ranges  []string
+	VMState string // "ok", "down", "off", "unknown"
 }
 
 func (s *Server) handleGraphsPage(w http.ResponseWriter, r *http.Request) {
@@ -399,9 +433,9 @@ func (s *Server) handleGraphsPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login?next="+url.QueryEscape(s.cfg.BaseURL()+"/graphs"), http.StatusFound)
 		return
 	}
-	p := graphsPage{V: s.version, Host: s.hostname, User: s.cfg.User, Ranges: graphRangeOrder}
+	p := graphsPage{V: s.version, Page: "graphs", Header: s.headerView(), User: s.cfg.User, Ranges: graphRangeOrder}
 	for _, d := range graphDefs {
-		p.Panels = append(p.Panels, graphPanel{Name: d.Name, Title: d.Title, Unit: d.Unit, Desc: d.Desc})
+		p.Panels = append(p.Panels, graphPanel{Name: d.Name, Title: d.Title, Unit: d.Unit, Desc: d.Desc, Stacked: d.Stacked})
 	}
 	// The banner comes from the LAST known VM status (refreshed in the
 	// background and by every chart fetch), so rendering this page never

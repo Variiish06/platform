@@ -2,37 +2,33 @@
 <html lang="en">
 <head>
 {{template "head" .}}
-<title>exp.lab</title>
+<title>{{.Header.Host}} · exp.lab</title>
 <script src="/static/app.js?v={{.V}}" defer></script>
 </head>
 <body>
-{{template "icons"}}
-<header class="top">
-  <div class="top-in">
-    {{template "brand"}}
-    <span class="host mono">{{.Host}}</span>
-    <nav class="nav" aria-label="Pages"><a href="/" aria-current="page">Dashboard</a><a href="/graphs">Graphs</a></nav>
-    <span class="live" id="live" data-state="connecting" role="status"><i class="dot"></i><span id="live-text">Connecting</span></span>
-    <form method="post" action="/logout">
-      <button class="icon-btn" type="submit" aria-label="Sign out" title="Sign out"><svg class="ico"><use href="#i-logout"/></svg></button>
-    </form>
-  </div>
-</header>
+<div class="wrap">
+{{template "strip" .}}
+<main>
+  <h1 class="visually-hidden">{{.Header.Host}}: status</h1>
+  {{/* The one sentence: is everything fine? Live-updated and announced. */}}
+  <p class="status" id="status" role="status" aria-live="polite">{{template "status" .Status}}</p>
 
-<main class="page">
-  <section class="sec" id="apps" aria-label="Apps">{{template "apps" .Apps}}</section>
+  <section class="sec" id="apps" aria-labelledby="h-apps">{{template "apps" .Apps}}</section>
 
-  <section class="sec" aria-label="System">
-    <div class="sec-head"><h2>System</h2><span class="count mono">{{.Host}}</span></div>
-    <div class="stats" id="stats">{{template "stats" .Stats}}</div>
+  <section class="sec" aria-labelledby="h-sys">
+    <header class="sec-h"><h2 id="h-sys">System</h2></header>
+    <div class="sec-b"><div class="readings" id="stats">{{template "stats" .Stats}}</div></div>
   </section>
 
-  <section class="sec" id="containers" aria-label="Containers">{{template "containers" .Containers}}</section>
+  <section class="sec" id="memory" aria-labelledby="h-mem">{{template "memory" .Memory}}</section>
 
-  <section class="sec" id="backup" aria-label="Backups">{{template "backup" .Backup}}</section>
+  <section class="sec" id="containers" aria-labelledby="h-ct">{{template "containers" .Containers}}</section>
 
-  <section class="sec" id="notify" aria-label="Notifications">{{template "notify" .Notify}}</section>
+  <section class="sec" id="backup" aria-labelledby="h-bk">{{template "backup" .Backup}}</section>
+
+  <section class="sec" id="notify" aria-labelledby="h-nt">{{template "notify" .Notify}}</section>
 </main>
+</div>
 
 <dialog id="confirm" class="dialog" aria-labelledby="confirm-title">
   <form method="dialog">
@@ -50,7 +46,7 @@
     <h3 id="restore-title">Restore to staging?</h3>
     <p>This copies a snapshot into a new folder under <span class="mono">~/restore-staging/</span> on the server, so you can look at or copy files from it.</p>
     <p><strong>It never touches live data:</strong> no app, database or container is changed or stopped.</p>
-    <label class="field restore-pick">
+    <label class="field">
       <span>Snapshot</span>
       <select id="restore-snap" name="snapshot"><option value="latest">Latest</option></select>
     </label>

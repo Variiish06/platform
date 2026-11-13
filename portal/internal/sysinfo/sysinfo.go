@@ -25,6 +25,8 @@ type Snapshot struct {
 	CPUPercent float64 // busy share of all cores since the previous snapshot
 	Cores      int
 	Load1      float64
+	Load5      float64
+	Load15     float64
 
 	MemTotal, MemUsed   uint64 // bytes; used = total - available
 	DiskTotal, DiskUsed uint64 // bytes, for the filesystem holding the data dir
@@ -113,8 +115,10 @@ func (c *Collector) cpu(s *Snapshot) {
 		}
 	}
 	if b, err := os.ReadFile(filepath.Join(c.Proc, "loadavg")); err == nil {
-		if f := strings.Fields(string(b)); len(f) > 0 {
+		if f := strings.Fields(string(b)); len(f) >= 3 {
 			s.Load1, _ = strconv.ParseFloat(f[0], 64)
+			s.Load5, _ = strconv.ParseFloat(f[1], 64)
+			s.Load15, _ = strconv.ParseFloat(f[2], 64)
 		}
 	}
 }

@@ -10,8 +10,8 @@ Other documents: [NOTIFY.md](NOTIFY.md) (sending notifications), [RESTORE.md](RE
 
 | URL | What | Portal login |
 |---|---|---|
-| `http://exp.lab/` | Dashboard: apps (with 30-day uptime bars), system, containers, notifications, backups | yes |
-| `http://exp.lab/graphs` | Charts: CPU, RAM, disk, temperature, network, battery, containers, backups (1 h to 30 days) | yes |
+| `http://exp.lab/` | Dashboard: one-line status, apps (with 30-day uptime), system, memory breakdown, containers, backups, notifications | yes |
+| `http://exp.lab/graphs` | Charts: CPU, RAM, memory by group, disk, temperature, network, battery, containers, backups (1 h to 30 days) | yes |
 | `http://focal.exp.lab/` | Focal (pomodoro) | yes |
 | `http://ritual.exp.lab/` | Ritual (habits, to-dos) | yes |
 | `http://bot.exp.lab/` | Groq bots UI (stopped; shows "Down") | yes |
@@ -82,7 +82,7 @@ Eleven containers in the compose project `platform`. `docker-compose.yml` holds 
 |---|---|---|---|---|
 | `caddy` | `caddy:2-alpine` (not pinned) | `:80` on Tailscale IP + LAN IP | 64 MB | Reverse proxy, the only thing facing the network |
 | `coredns` | `coredns/coredns:1.12.1` | `:53` on Tailscale IP | 32 MB | DNS for `*.exp.lab` |
-| `portal` | built from `./portal` (Go) | `127.0.0.1:7080` | 96 MB | Login, dashboard, forward-auth, graphs, `/api/notify` |
+| `portal` | built from `./portal` (Go) | `127.0.0.1:7080` | 96 MB | Login, dashboard, forward-auth, graphs, `/api/notify`, memory breakdown (reads the host's `/proc` read-only) |
 | `docker-proxy` | `wollomatic/socket-proxy:1.13.2` (digest pinned) | socket `run/portal/docker.sock` | 24 MB | Portal's filtered Docker access: list, stats, restart |
 | `ntfy` | `binwiederhier/ntfy:v2.37.2` | `127.0.0.1:2586` (+ `ntfy:80` on network `platform_internal`) | 64 MB | Notification hub (`compose.notify.yml`) |
 | `victoriametrics` | `victoriametrics/victoria-metrics:v1.155.0` | `127.0.0.1:8428` | 160 MB | Time-series database and scraper, 30-day retention |
@@ -118,7 +118,13 @@ secrets/                 files made from .env: ntfy-alerts-token, rclone.conf (g
 run/portal/              docker-proxy's socket for Portal; run/textfile/ backup metrics
 portal/                  Go source of Portal
 portalctl                runs Portal admin commands
+tools/                   cs (Claude Code session manager) and its tests
 ```
+
+Tools:
+
+- **Claude sessions**: `cs` (tools/cs) lists, starts (`claude --continue` per project in tmux) and stops idle Claude Code sessions to free RAM; see [SESSIONS.md](SESSIONS.md).
+- Config: `~/.config/cs/projects.conf` (example: tools/cs.projects.example); tests: `tools/cs-test.sh`.
 
 ## What you must do once
 
@@ -162,6 +168,18 @@ http://exp.lab/
 ```
 
 Without `http://`, browsers treat `exp.lab` as a search, and Safari may try HTTPS first. After the first visit, bookmark it or add it to the Home Screen (Safari → Share → Add to Home Screen).
+
+What the dashboard shows, top to bottom:
+
+- **Status line.** One sentence that says whether everything is fine, for example "All 7 apps up · last backup 2 h ago · no alerts firing". Anything that needs attention comes first, in amber or red, and is also spelled out in words ("Bots is down", "backup failed 01:20", "2 alerts firing: ContainerDown ×2"). Healthy things have no colour at all.
+- **Apps.** One row per app: state (only shown when it is not up), response time, the last 30 days as thin daily segments (hover for the day's %), and uptime %.
+- **System.** CPU (with a short history line), load, RAM, disk, temperature, power, WiFi.
+- **Memory.** What is using the RAM, split into groups that add up to the total: containers (by compose project), Claude Code sessions (each `claude` CLI with everything it started; idle ones can be stopped with `cs stop --idle`), the Docker engine, your other processes, system services, the kernel, page cache (memory Linux lends to file caching and takes back the moment a program needs it) and free memory. Click a group to see its rows. Portal reads the host's `/proc` read-only for this (see [DECISIONS.md](DECISIONS.md) #81); command lines are shown shortened, with anything that looks like a token or password replaced by `***`.
+- **Containers.** A table: name, project, uptime, CPU, memory, and Restart (or Start). Click a column heading to sort; stopped containers are dimmed at the bottom.
+- **Backups.** The latest run, success, repository, check and restore test, plus "Back up now" and "Restore to staging…".
+- **Notifications.** The last messages from ntfy as a log; high/urgent ones have an amber/red rule.
+
+The header has **Light/Dark**: the page follows your system setting until you press it, then remembers your choice in that browser.
 
 ## Morning steps
 
@@ -244,7 +262,7 @@ Because of the 24-hour rule, a container that stays down for more than a day sto
 
 **Silence an alert** (planned maintenance, a known problem): open `http://alerts.exp.lab` → **New Silence** → add a matcher such as `alertname="DiskFull"` (or `name="focal"` for one container) → set the duration → enter a comment → **Create**. Silenced alerts still show in the UI but send nothing until the silence expires. You can also click the bell icon next to an active alert to pre-fill the matchers.
 
-**Graphs.** `http://exp.lab/graphs` draws 13 charts from VictoriaMetrics for 1 h, 6 h, 24 h, 7 days or 30 days. The queries are fixed in Portal (`portal/internal/server/graphs.go`); the page never sends its own. For anything else, use `http://vm.exp.lab/vmui/` and type PromQL, for example `portal_container_memory_bytes` or `rate(node_network_receive_bytes_total{device="wlp0s20f3"}[5m])`. The app tiles on the dashboard show a 30-day uptime bar (one segment per IST day).
+**Graphs.** `http://exp.lab/graphs` draws 14 charts from VictoriaMetrics for 1 h, 6 h, 24 h, 7 days or 30 days. The queries are fixed in Portal (`portal/internal/server/graphs.go`); the page never sends its own. For anything else, use `http://vm.exp.lab/vmui/` and type PromQL, for example `portal_container_memory_bytes` or `rate(node_network_receive_bytes_total{device="wlp0s20f3"}[5m])`. The Apps table on the dashboard shows 30 days of uptime (one thin segment per IST day). "Memory by group" is the dashboard's memory breakdown over time, as stacked areas.
 
 ## Backups
 
@@ -425,7 +443,7 @@ Caddy can be its own certificate authority (CA):
 | Login says "No password has been set yet" | Run `./portalctl set-password` |
 | "Too many attempts" | Wait for the time shown. It doubles with each further failure (2s, 4s, 8s … 15 min) and resets after a correct login. Restarting Portal also clears it: `docker compose restart portal` |
 | Signed in, but an app still sends you to the login page | The cookie did not reach the subdomain. Sign in at `http://exp.lab/` (not at an IP address), and check the browser is not blocking cookies |
-| Tile shows "Down · connection refused" | The app is not running. Find it under Containers and press its start/restart button |
+| An app row shows "down · connection refused" | The app is not running. Find it under Containers and press its start/restart button |
 | `502` from an app URL | Same as above: Caddy could not connect to the app's port |
 | `404 No app is configured for …` | That hostname has no entry in `data/apps.yaml` |
 | Dashboard says "Can't reach Docker" | `docker compose up -d docker-proxy` |

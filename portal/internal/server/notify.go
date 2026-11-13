@@ -41,6 +41,18 @@ type notifData struct {
 	Error string
 }
 
+// notifRecent is how many messages the log shows before "N older".
+const notifRecent = 8
+
+// Recent and Older split the list for the template.
+func (d notifData) Recent() []notifItem { return d.Items[:min(len(d.Items), notifRecent)] }
+func (d notifData) Older() []notifItem {
+	if len(d.Items) <= notifRecent {
+		return nil
+	}
+	return d.Items[notifRecent:]
+}
+
 // panelMessageRunes is how much of a message the list shows.
 const panelMessageRunes = 280
 

@@ -1,0 +1,33 @@
+{{/* Shared page parts. No inline scripts or styles anywhere (CSP):
+     theme.js runs from <head> before first paint to apply the stored
+     light/dark choice without a flash. */}}
+{{define "head"}}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#12110e" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f4f1e8" media="(prefers-color-scheme: light)">
+<meta name="robots" content="noindex">
+<link rel="icon" href="/static/favicon.svg?v={{.V}}" type="image/svg+xml">
+<script src="/static/theme.js?v={{.V}}"></script>
+<link rel="stylesheet" href="/static/app.css?v={{.V}}">
+{{end}}
+
+{{/* The header strip: host, uptime, local time, links. Expects .Header
+     and .Page ("dashboard" or "graphs"). */}}
+{{define "strip"}}
+<header class="strip">
+  <span class="host"><a href="/">{{.Header.Host}}</a></span>
+  <span class="meta">
+    <span data-key="uptime" title="Host uptime">up <span data-f="v" class="mono">{{.Header.Uptime}}</span></span>
+    <span title="Local time on the server"><time id="clock" datetime="{{.Header.TimeISO}}">{{.Header.Time}}</time></span>
+  </span>
+  <nav aria-label="Pages">
+    <a href="/"{{if eq .Page "dashboard"}} aria-current="page"{{end}}>Dashboard</a>
+    <a href="/graphs"{{if eq .Page "graphs"}} aria-current="page"{{end}}>Graphs</a>
+    <button class="linkbtn" type="button" id="theme-toggle" hidden>Theme</button>
+    <form method="post" action="/logout"><button class="linkbtn" type="submit">Sign out</button></form>
+    {{if eq .Page "dashboard"}}<span class="live" id="live" data-state="connecting" role="status"><span id="live-text">connecting</span></span>{{end}}
+  </nav>
+</header>
+{{end}}

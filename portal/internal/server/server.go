@@ -23,6 +23,7 @@ import (
 	"portal/internal/docker"
 	"portal/internal/metricsdb"
 	"portal/internal/notify"
+	"portal/internal/procmem"
 	"portal/internal/sysinfo"
 )
 
@@ -41,6 +42,12 @@ type Config struct {
 	NtfyToken    string // Portal's READ-ONLY ntfy token, used only for polling
 	VMURL        string // VictoriaMetrics, e.g. http://127.0.0.1:8428; empty disables graphs/uptime
 	BackupDir    string // shared with the backup container; default <DataDir>/backup
+	// HostProc is the host's /proc mounted read-only (e.g. /host/proc) for
+	// the Memory panel; empty disables the panel.
+	HostProc string
+	// ClaudeSessions is Claude Code's ~/.claude/sessions, read-only;
+	// optional, it only adds working directories and idle/busy status.
+	ClaudeSessions string
 }
 
 // Scheme is the URL scheme browsers use to reach the site.
@@ -77,8 +84,8 @@ type Server struct {
 	notifyPoll  *notify.Poller
 	notifyPub   *notify.Publisher
 	notifyLimit *notify.RateLimiter
-	hostname string
-	version  string // cache-busting suffix for static files
+	hostname    string
+	version     string // cache-busting suffix for static files
 
 	graphCache *graphCache
 
@@ -102,6 +109,11 @@ type Server struct {
 	uptime       uptimeData
 	vmCheckedAt  time.Time // last VictoriaMetrics call (any outcome)
 	vmErr        string    // its error, "" if it worked
+	alerts       alertsData
+	mem          procmem.Breakdown // last host memory scan
+	memErr       string
+
+	memScan *procmem.Scanner // nil when PORTAL_HOST_PROC is not set
 }
 
 // New builds a server. It does not start listening.
@@ -119,8 +131,13 @@ func New(cfg Config, db *sql.DB) (*Server, error) {
 	if backupDir == "" {
 		backupDir = filepath.Join(cfg.DataDir, "backup")
 	}
+	var memScan *procmem.Scanner
+	if cfg.HostProc != "" {
+		memScan = &procmem.Scanner{Proc: cfg.HostProc, SessionsDir: cfg.ClaudeSessions, UID: os.Getuid()}
+	}
 	return &Server{
-		cfg: cfg, db: db,
+		memScan: memScan,
+		cfg:     cfg, db: db,
 		sessions: auth.NewSessionStore(db),
 		limiter:  auth.NewLimiter(),
 		apps:     reg,
@@ -205,8 +222,50 @@ func (s *Server) routes() http.Handler {
 	// Open on loopback without X-Forwarded-For (the scraper); session
 	// otherwise. See handleMetrics.
 	mux.Handle("GET /metrics", s.wrap("metrics", s.handleMetrics))
-	return mux
+	return s.styledNotFound(mux)
 }
+
+// errorPage is the data for error.html.
+type errorPage struct {
+	V, Title, Text string
+	Code           int
+}
+
+// styledNotFound answers a browser's GET for an unknown path with a page
+// in the site's look (and the usual security headers) instead of Go's
+// plain "404 page not found". Everything else, including 405 for a GET to
+// a POST-only path, is the mux's own answer.
+func (s *Server) styledNotFound(mux *http.ServeMux) http.Handler {
+	notFound := s.wrap("not_found", func(w http.ResponseWriter, r *http.Request) {
+		s.render(w, http.StatusNotFound, "error.html", errorPage{V: s.version, Code: http.StatusNotFound,
+			Title: "Nothing here", Text: "There is no page at this address."})
+	})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html") {
+			if _, pattern := mux.Handler(r); pattern == "" {
+				// No pattern matched: either a 404 or a 405. A 405 lists
+				// the allowed methods; ask the mux which it is.
+				probe := &headerProbe{h: http.Header{}}
+				mux.ServeHTTP(probe, r)
+				if probe.code == http.StatusNotFound {
+					notFound.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+// headerProbe records only the status code of a response.
+type headerProbe struct {
+	h    http.Header
+	code int
+}
+
+func (p *headerProbe) Header() http.Header         { return p.h }
+func (p *headerProbe) Write(b []byte) (int, error) { return len(b), nil }
+func (p *headerProbe) WriteHeader(code int)        { p.code = code }
 
 // statusRecorder remembers the status code a handler wrote, for metrics.
 type statusRecorder struct {

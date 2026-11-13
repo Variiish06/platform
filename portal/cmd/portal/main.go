@@ -60,6 +60,9 @@ func config() server.Config {
 		NtfyToken:    os.Getenv("PORTAL_NTFY_TOKEN"),
 		VMURL:        os.Getenv("PORTAL_VM_URL"),
 		BackupDir:    os.Getenv("PORTAL_BACKUP_DIR"), // default <data>/backup
+		// Memory panel: the host's /proc (read-only). Unset = panel off.
+		HostProc:       os.Getenv("PORTAL_HOST_PROC"),
+		ClaudeSessions: os.Getenv("PORTAL_CLAUDE_SESSIONS"),
 	}
 }
 

@@ -5,27 +5,45 @@
 //
 // uPlot wants columnar data: data[0] = x values (unix seconds), data[1..]
 // = one array per line, null for gaps. That is exactly what the API sends.
+// Colours come from the CSS custom properties, so the charts follow the
+// light/dark theme and are redrawn when it changes.
 (function () {
   'use strict';
   const $ = (sel, root) => (root || document).querySelector(sel);
   const REFRESH_MS = 45000;
-  // Line colours for the dark theme; the first is the site's mint accent.
-  const COLORS = ['#5eead4', '#60a5fa', '#fbbf24', '#f472b6', '#a78bfa', '#4ade80',
-    '#fb923c', '#f87171', '#22d3ee', '#e879f9', '#facc15', '#94a3b8'];
+  const MONO = '11px ui-monospace, "SF Mono", "Cascadia Mono", Consolas, "Liberation Mono", monospace';
+
+  // ---- Theme ---------------------------------------------------------------
+  let theme = {};
+  function readTheme() {
+    const cs = getComputedStyle(document.documentElement);
+    const v = function (n) { return cs.getPropertyValue(n).trim(); };
+    theme = {
+      ink: v('--ink'), ink2: v('--ink-2'), ink3: v('--ink-3'), rule: v('--rule'), rule2: v('--rule-2'), accent: v('--accent'),
+      // Lines: six colours, then the same six dashed (series 7-12).
+      lines: [v('--c1'), v('--c2'), v('--c3'), v('--c4'), v('--c5'), v('--c6')],
+      // Stacked memory: the same shades as the dashboard's memory bar.
+      areas: [v('--m1'), v('--m2'), v('--m3'), v('--m4'), v('--m5'), v('--m6'), v('--m-cache'), v('--bg')]
+    };
+  }
+  readTheme();
+  function lineStyle(i) {
+    return { color: theme.lines[i % 6], dash: i >= 6 ? [5, 3] : null };
+  }
 
   // ---- Units ---------------------------------------------------------------
   function bytes(v) {
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
     let i = 0;
     let n = Math.abs(v);
     while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-    return (v < 0 ? '-' : '') + (n >= 100 || i === 0 ? n.toFixed(0) : n.toFixed(1)) + ' ' + units[i];
+    return (v < 0 ? '-' : '') + (i === 0 ? n.toFixed(0) : n.toFixed(1)) + ' ' + units[i];
   }
   const FORMAT = {
     percent: function (v) { return (Math.abs(v) < 10 ? v.toFixed(1) : v.toFixed(0)) + '%'; },
     bytes: bytes,
     bytes_s: function (v) { return bytes(v) + '/s'; },
-    celsius: function (v) { return v.toFixed(0) + '°C'; },
+    celsius: function (v) { return v.toFixed(0) + ' °C'; },
     seconds: function (v) {
       if (v < 1) return (v * 1000).toFixed(v < 0.01 ? 1 : 0) + ' ms';
       if (v < 120) return v.toFixed(v < 10 ? 1 : 0) + ' s';
@@ -67,50 +85,69 @@
   const charts = [];
   document.querySelectorAll('[data-graph]').forEach(function (fig) {
     charts.push({
-      fig: fig, name: fig.dataset.graph, unit: fig.dataset.unit,
+      fig: fig, name: fig.dataset.graph, unit: fig.dataset.unit, stacked: fig.dataset.stacked === '1',
       plotEl: $('.chart-plot', fig), emptyEl: $('.chart-empty', fig), legendEl: $('.chart-legend', fig),
-      plot: null, key: '', data: null, labels: []
+      plot: null, key: '', raw: null, labels: [], res: null
     });
   });
 
   function plotSize(c) {
-    const w = Math.max(200, Math.floor(c.plotEl.clientWidth || c.fig.clientWidth - 24));
-    return { width: w, height: w < 420 ? 170 : 200 };
+    const w = Math.max(200, Math.floor(c.plotEl.clientWidth || c.fig.clientWidth));
+    return { width: w, height: c.stacked ? 240 : (w < 420 ? 150 : 170) };
   }
 
-  // x-axis labels: uPlot formats times in the browser's zone (IST on the
-  // owner's devices). Short formats so a phone-width axis is not crowded.
   function axisStyle(extra) {
     return Object.assign({
-      stroke: '#7d8896',
-      grid: { stroke: 'rgba(255,255,255,.06)', width: 1 },
-      ticks: { stroke: 'rgba(255,255,255,.1)', width: 1, size: 4 },
-      font: '11px system-ui, -apple-system, sans-serif'
+      stroke: theme.ink3,
+      grid: { stroke: theme.rule, width: 1 },
+      ticks: { stroke: theme.rule, width: 1, size: 3 },
+      font: MONO
     }, extra || {});
+  }
+
+  // Stacked charts draw running totals: series k is the sum of series
+  // 1..k, and the band between k and k-1 is filled. The legend still
+  // shows each part's own value (from c.raw).
+  function cumulative(data) {
+    const out = [data[0]];
+    let acc = null;
+    for (let i = 1; i < data.length; i++) {
+      acc = data[i].map(function (v, j) {
+        const below = acc ? acc[j] : 0;
+        return v == null ? below : (below == null ? v : below + v);
+      });
+      out.push(acc);
+    }
+    return out;
   }
 
   function makePlot(c, res) {
     if (c.plot) { c.plot.destroy(); c.plot = null; }
     const unit = c.unit;
     const series = [{}].concat(res.series.map(function (s, i) {
-      return {
-        label: s.label, stroke: COLORS[i % COLORS.length], width: 1.6,
-        // points: uPlot's default draws dots only when data is sparse, so
-        // isolated samples (a fresh install, a gap) are still visible.
-        spanGaps: false,
-        value: function (u, v) { return fmt(unit, v); }
-      };
+      const base = { label: s.label, spanGaps: false, value: function (u, v) { return fmt(unit, v); } };
+      if (c.stacked) {
+        const fill = theme.areas[i % theme.areas.length];
+        return Object.assign(base, { stroke: theme.rule2, width: 1, fill: i === 0 ? fill : undefined, points: { show: false } });
+      }
+      const ls = lineStyle(i);
+      return Object.assign(base, { stroke: ls.color, width: 1, dash: ls.dash || undefined });
     }));
+    const bands = [];
+    if (c.stacked) {
+      for (let i = 2; i <= res.series.length; i++) bands.push({ series: [i, i - 1], fill: theme.areas[(i - 1) % theme.areas.length] });
+    }
     const opts = Object.assign(plotSize(c), {
       series: series,
-      legend: { show: false }, // our own legend below (latest values, theme)
-      cursor: { points: { size: 6 }, drag: { x: false, y: false } },
+      bands: bands,
+      legend: { show: false }, // our own legend below (latest values)
+      cursor: { points: { size: 5, fill: theme.accent }, drag: { x: false, y: false } },
       scales: {
         x: { time: true },
         y: {
           range: function (u, min, max) {
             const lo = Math.min(0, min);
-            let hi = max > 0 ? max * 1.12 : 1;
+            let hi = max > 0 ? max * (c.stacked ? 1.02 : 1.12) : 1;
             // Percent charts that come near 100 get a fixed 0-100 scale.
             if (unit === 'percent' && max <= 100 && max > 60) hi = 100;
             return [lo, hi];
@@ -119,20 +156,28 @@
       },
       axes: [
         axisStyle(),
-        axisStyle({ size: 58, values: function (u, vals) { return vals.map(function (v) { return fmt(unit, v); }); } })
+        axisStyle({
+          values: function (u, vals) { return vals.map(function (v) { return fmt(unit, v); }); },
+          // Wide enough for the longest label ("390.6 KiB/s"): ~6.7 px per
+          // monospace character at 11 px, plus the ticks and a gap.
+          size: function (u, values) {
+            const n = (values || []).reduce(function (m, s) { return Math.max(m, String(s).length); }, 4);
+            return Math.ceil(n * 6.7) + 14;
+          }
+        })
       ],
       hooks: { setCursor: [function (u) { renderLegend(c, u.cursor.idx); }] }
     });
-    c.plot = new uPlot(opts, res.data, c.plotEl);
+    c.plot = new uPlot(opts, c.stacked ? cumulative(res.data) : res.data, c.plotEl);
   }
 
-  // Legend: one row per line with its colour and the value under the
+  // Legend: one row per series with its swatch and the value under the
   // cursor, or the latest value when the cursor is not on the chart.
   function renderLegend(c, idx) {
-    if (!c.data) return;
+    if (!c.raw) return;
     const rows = c.legendEl.children;
     for (let i = 0; i < c.labels.length; i++) {
-      const vals = c.data[i + 1];
+      const vals = c.raw[i + 1];
       let v = null;
       if (idx != null) v = vals[idx];
       else for (let j = vals.length - 1; j >= 0; j--) if (vals[j] != null) { v = vals[j]; break; }
@@ -146,7 +191,14 @@
       const li = document.createElement('li');
       const sw = document.createElement('i');
       sw.className = 'sw';
-      sw.style.background = COLORS[i % COLORS.length]; // CSSOM, allowed by the CSP
+      if (c.stacked) {
+        sw.className = 'sw area';
+        sw.style.background = theme.areas[i % theme.areas.length]; // CSSOM, allowed by the CSP
+        sw.style.boxShadow = 'inset 0 0 0 1px ' + theme.rule2;
+      } else {
+        const ls = lineStyle(i);
+        if (ls.dash) { sw.className = 'sw dash'; sw.style.borderTopColor = ls.color; } else sw.style.background = ls.color;
+      }
       const name = document.createElement('span');
       name.className = 'lg-name';
       name.textContent = label; // textContent: labels are never parsed as HTML
@@ -169,7 +221,8 @@
     c.emptyEl.textContent = text;
     if (c.plot) { c.plot.destroy(); c.plot = null; c.key = ''; }
     c.legendEl.textContent = '';
-    c.data = null;
+    c.raw = null;
+    c.res = null;
   }
 
   function load(c) {
@@ -188,10 +241,11 @@
         if (!res.series.length || !hasValues(res)) { showEmpty(c, 'No data yet'); return; }
         c.fig.classList.remove('is-empty');
         const key = r + '|' + res.series.map(function (s) { return s.label; }).join('\u0000');
-        c.data = res.data;
+        c.raw = res.data;
+        c.res = res;
         c.labels = res.series.map(function (s) { return s.label; });
         if (c.plot && c.key === key) {
-          c.plot.setData(res.data); // same lines: update in place, keeps the DOM
+          c.plot.setData(c.stacked ? cumulative(res.data) : res.data); // same lines: update in place
         } else {
           buildLegend(c);
           makePlot(c, res); // first draw, or the set of lines changed (top N)
@@ -209,6 +263,12 @@
     lastRefresh = Date.now();
     charts.forEach(load);
   }
+
+  // Theme switched (button or system): redraw with the new colours.
+  document.addEventListener('portal:theme', function () {
+    readTheme();
+    charts.forEach(function (c) { if (c.res) { buildLegend(c); makePlot(c, c.res); renderLegend(c, null); } });
+  });
 
   // Auto-refresh only while the tab is visible: a background tab on a
   // phone should cost nothing.

@@ -62,25 +62,25 @@ A fast hash (SHA-256) is the wrong tool, because an attacker who steals the data
 - The result stores the parameters and salt next to the hash, so they can be raised later without breaking old hashes.
 - Verifying: `password.go:66`, ending in a constant-time comparison (`password.go:98`) whose duration does not reveal how many bytes matched.
 - Only one hash runs at a time (`password.go:40`), so ten simultaneous logins cannot use 190 MiB.
-- The CLI that sets the password: `portal/cmd/portal/main.go:167`.
+- The CLI that sets the password: `portal/cmd/portal/main.go:170`.
 
 ## 5. Cookie domain scoping
 
 A cookie normally belongs to the exact host that set it. A cookie set by `exp.lab` would not be sent to `focal.exp.lab`, and single sign-on would not work.
 
-Setting `Domain=exp.lab` on the cookie tells the browser to send it to `exp.lab` and every subdomain (`portal/internal/server/server.go:280`). That one attribute is what makes one login cover all apps.
+Setting `Domain=exp.lab` on the cookie tells the browser to send it to `exp.lab` and every subdomain (`portal/internal/server/server.go:339`). That one attribute is what makes one login cover all apps.
 
 Browsers refuse this for "public suffixes" such as `com` or `co.uk`. Otherwise one site could set cookies for every `.com` site. The Public Suffix List is the browsers' list of those. `exp.lab` is not on it (see DECISIONS.md), so the cookie is accepted.
 
 The other attributes:
 
-- `HttpOnly` (`server.go:284`): JavaScript cannot read the cookie, so a script-injection bug cannot steal it.
-- `SameSite=Lax` (`server.go:287`): the cookie is sent when you click a link to an app, but not on requests that other websites fire in the background.
+- `HttpOnly` (`server.go:343`): JavaScript cannot read the cookie, so a script-injection bug cannot steal it.
+- `SameSite=Lax` (`server.go:346`): the cookie is sent when you click a link to an app, but not on requests that other websites fire in the background.
 - `Secure`: only sent over HTTPS. Off until HTTPS is added (`COOKIE_SECURE` in `.env`).
 
 Sharing a cookie with every subdomain has a cost: every app would receive the Portal session cookie. A buggy app could leak it. So Caddy removes it from the request before proxying (`caddy/Caddyfile:52`). Apps get their own cookies and never Portal's.
 
-`SameSite` treats `focal.exp.lab` and `exp.lab` as the same site, so it does not stop one app from posting to the dashboard. For that, every state-changing request must carry an `Origin` header equal to `http://exp.lab` (`server.go:306`).
+`SameSite` treats `focal.exp.lab` and `exp.lab` as the same site, so it does not stop one app from posting to the dashboard. For that, every state-changing request must carry an `Origin` header equal to `http://exp.lab` (`server.go:365`).
 
 ## 6. SSE vs WebSockets
 
@@ -88,14 +88,14 @@ The dashboard updates without reloading. The server needs a way to push data to 
 
 **Server-Sent Events (used here).** The browser makes a normal GET request, and the server keeps the response open and writes a few lines of text whenever something changes. One direction only: server to browser.
 
-- The handler: `portal/internal/server/dashboard.go:266`. The content type is set at `dashboard.go:274`.
+- The handler: `portal/internal/server/dashboard.go:340`. The content type is set at `dashboard.go:348`.
 - The wire format is plain text: `event:`, `data:`, blank line (`portal/internal/server/hub.go:37`).
 - The hub copies each update to every open dashboard (`hub.go:65`) and gives a new one the latest state at once (`hub.go:82`).
-- A comment line every 20 seconds keeps idle connections alive (`dashboard.go:301`, written at `dashboard.go:321`).
-- In the browser, `EventSource` does the parsing and reconnects by itself (`portal/internal/server/web/static/app.js:82`). Phones kill background connections, so the page reconnects when it becomes visible (`app.js:107`).
-- App tiles and the container list arrive as ready-made HTML (`app.js:98`). System numbers arrive as JSON and are patched in place so the bars animate (`app.js:100`).
+- A comment line every 20 seconds keeps idle connections alive (`dashboard.go:375`, written at `dashboard.go:395`).
+- In the browser, `EventSource` does the parsing and reconnects by itself (`portal/internal/server/web/static/app.js:146`). Phones kill background connections, so the page reconnects when it becomes visible (`app.js:173`).
+- The apps table, the container list and the memory panel arrive as ready-made HTML (`app.js:163`). System numbers arrive as JSON and are patched in place (`app.js:166`).
 
-**WebSockets** are a separate protocol with messages in both directions. They suit chat or games. A dashboard only listens, and the one action it has (restart) is an ordinary POST (`dashboard.go:328`). SSE is less code, works through any HTTP proxy and reconnects for free.
+**WebSockets** are a separate protocol with messages in both directions. They suit chat or games. A dashboard only listens, and the one action it has (restart) is an ordinary POST (`dashboard.go:402`). SSE is less code, works through any HTTP proxy and reconnects for free.
 
 ## 7. Rate limiting
 
@@ -104,17 +104,17 @@ Without a limit, a script could try thousands of passwords a minute. With **expo
 - The limiter: `portal/internal/auth/ratelimit.go`. `Allow` at line 47, `Fail` at line 67, the doubling at line 85, reset on success at line 95.
 - It is checked before the password is looked at (`portal/internal/server/auth_handlers.go:115`). A locked-out client cannot test a guess at all, even the right one.
 - A failure is recorded at `auth_handlers.go:157`.
-- Clients are told apart by IP address (`portal/internal/server/server.go:313`). Caddy supplies the real address in `X-Forwarded-For`.
+- Clients are told apart by IP address (`portal/internal/server/server.go:372`). Caddy supplies the real address in `X-Forwarded-For`.
 
 ## 8. Smaller ideas worth knowing
 
-- **Least privilege for Docker.** Access to the Docker socket is root on the host. Portal never gets it. A separate proxy forwards only "list", "stats" and "restart" (`docker-compose.yml:116-117`) and has no network at all (`docker-compose.yml:118`). Its socket is in `run/portal/`, the only part of `run/` Portal mounts (`docker-compose.yml:82`). Portal's client: `portal/internal/docker/docker.go:58` (HTTP over a unix socket), `docker.go:97` (list), `docker.go:136` (restart).
-- **Reading the machine.** CPU, memory, battery and WiFi come from kernel pseudo-files, with no tools run: `portal/internal/sysinfo/sysinfo.go:83` (CPU from `/proc/stat`), `:125` (memory), `:167` (temperature), `:206` (WiFi), `:232` (battery from `/sys/class/power_supply`).
+- **Least privilege for Docker.** Access to the Docker socket is root on the host. Portal never gets it. A separate proxy forwards only "list", "stats" and "restart" (`docker-compose.yml:130-131`) and has no network at all (`docker-compose.yml:132`). Its socket is in `run/portal/`, the only part of `run/` Portal mounts (`docker-compose.yml:89`). Portal's client: `portal/internal/docker/docker.go:61` (HTTP over a unix socket), `docker.go:100` (list), `docker.go:141` (restart).
+- **Reading the machine.** CPU, memory, battery and WiFi come from kernel pseudo-files, with no tools run: `portal/internal/sysinfo/sysinfo.go:85` (CPU from `/proc/stat`), `:125` (memory), `:167` (temperature), `:206` (WiFi), `:232` (battery from `/sys/class/power_supply`).
 - **Health checks.** Every 30 seconds each app is requested directly (`portal/internal/apps/apps.go:218`). Any answer below HTTP 500 counts as up.
 - **Config hot reload.** `apps.yaml` is re-read when its modification time changes. A broken edit keeps the previous version (`apps.go:141`).
-- **Content-Security-Policy.** A response header that tells the browser to run scripts only from this site (`portal/internal/server/server.go:234`).
+- **Content-Security-Policy.** A response header that tells the browser to run scripts only from this site (`portal/internal/server/server.go:293`).
 - **SQLite in WAL mode.** Lets the CLI write while the server reads (`portal/internal/store/store.go:40`).
-- **Metrics.** `/metrics` is plain text in Prometheus format, written by hand (`portal/internal/server/metrics.go:120`; more in section 10).
+- **Metrics.** `/metrics` is plain text in Prometheus format, written by hand (`portal/internal/server/metrics.go:121`; more in section 10).
 - **Tests.** `portal/internal/auth/*_test.go` cover hashing, session expiry, redirect validation, the rate limiter and TOTP. They run on every image build (`portal/Dockerfile`), so a failing test stops a deploy.
 
 ---
@@ -133,7 +133,7 @@ In ntfy, publishing is one HTTP request: `POST http://ntfy.exp.lab/backups` with
 
 **Three ways to receive.** A subscriber can:
 
-1. **Poll**: ask "anything new since X?" now and then and get an answer that ends. Portal does this every 15 seconds (`portal/internal/server/dashboard.go:483`) with one request for all six topics, `GET /system,backups,.../json?poll=1&since=<last id>` (`portal/internal/notify/notify.go:151`). Simple and robust, but up to 15 seconds late, and every poll costs a request even when nothing happened.
+1. **Poll**: ask "anything new since X?" now and then and get an answer that ends. Portal does this every 15 seconds (`portal/internal/server/dashboard.go:590`) with one request for all six topics, `GET /system,backups,.../json?poll=1&since=<last id>` (`portal/internal/notify/notify.go:151`). Simple and robust, but up to 15 seconds late, and every poll costs a request even when nothing happened.
 2. **Stream**: open one request that never ends, and the server writes each message down it as it happens. Instant and cheap while idle, but the connection must stay open (NOTIFY.md shows `curl -sN .../system/json`).
 3. **Push**: a third party wakes the device when there is something to fetch. Phones need this, because iOS kills background connections to save battery. Only Apple's push service (**APNs**) may wake an app, and only the holder of an app's APNs key may send to it. For the ntfy app, that is the public `ntfy.sh` server.
 
@@ -150,15 +150,15 @@ Two more pub/sub details in this stack:
 - It never waits for a slow subscriber: if a tab's buffer is full, that tab misses this update and gets the next full state instead (`portal/internal/server/hub.go:70`).
 - `Subscribe` hands a new tab the latest message of every event at once (`portal/internal/server/hub.go:78`), like ntfy's cache.
 - Notification text comes from outside, so before it is framed as an event every `\r` is turned into `\n`. Otherwise a message could start a line of its own that the browser reads as a separate SSE field and forge an event (`portal/internal/server/hub.go:40`, inside `formatEvent` at `hub.go:37`). This was a security-review fix (section 17 has another one).
-- The Notifications panel is published to this hub after each ntfy poll (`portal/internal/server/notify.go:110`) and right after a successful `/api/notify` (`portal/internal/server/notify.go:190`).
+- The Notifications panel is published to this hub after each ntfy poll (`portal/internal/server/notify.go:122`) and right after a successful `/api/notify` (`portal/internal/server/notify.go:202`).
 
 ## 10. Pull-based metrics and time-series databases
 
 A **metric** is a number with a name, for example "RAM available". A **time series** is that number recorded again and again: a list of (time, value) pairs. A **time-series database** (TSDB) is built to store millions of such pairs cheaply and answer questions like "average over the last hour".
 
-**Pull, not push.** Programs here do not send their numbers anywhere. Each one serves a plain-text page, `/metrics`, with its current values. VictoriaMetrics fetches ("scrapes") every page every 30 seconds (`monitoring/scrape.yml:34`) and stores each line with the time it read it. The comment at `portal/internal/server/metrics.go:16` explains the upside: when a program dies, the scrape fails and the scraper records `up = 0`. A push-based program that dies just goes quiet, and silence looks the same as "nothing to report".
+**Pull, not push.** Programs here do not send their numbers anywhere. Each one serves a plain-text page, `/metrics`, with its current values. VictoriaMetrics fetches ("scrapes") every page every 30 seconds (`monitoring/scrape.yml:34`) and stores each line with the time it read it. The comment at `portal/internal/server/metrics.go:17` explains the upside: when a program dies, the scrape fails and the scraper records `up = 0`. A push-based program that dies just goes quiet, and silence looks the same as "nothing to report".
 
-**The exposition format.** Portal writes the page by hand (`portal/internal/server/metrics.go:120`):
+**The exposition format.** Portal writes the page by hand (`portal/internal/server/metrics.go:121`):
 
 ```
 # HELP portal_app_up Whether the app's last health check succeeded.
@@ -166,10 +166,10 @@ A **metric** is a number with a name, for example "RAM available". A **time seri
 portal_app_up{app="focal"} 1
 ```
 
-- `HELP` and `TYPE` are comments for humans and tools. A **gauge** is a reading that goes up and down (temperature, "is it up"). A **counter** only goes up (requests served since start) and is meaningful only as a rate (`metrics.go:32`).
+- `HELP` and `TYPE` are comments for humans and tools. A **gauge** is a reading that goes up and down (temperature, "is it up"). A **counter** only goes up (requests served since start) and is meaningful only as a rate (`metrics.go:33`).
 - `{app="focal"}` is a **label**. The name plus the full set of labels identifies one series: `portal_app_up{app="focal"}` and `portal_app_up{app="git"}` are two series.
-- Label values must escape `\`, `"` and newline (`metrics.go:54`).
-- A counter that only appears after its first increment makes `rate()` miss that first event, so Portal prints every combination from the start, zeros included (`metrics.go:157`).
+- Label values must escape `\`, `"` and newline (`metrics.go:55`).
+- A counter that only appears after its first increment makes `rate()` miss that first event, so Portal prints every combination from the start, zeros included (`metrics.go:158`).
 - `portal_container_up` is printed for **every** container, stopped ones as `0` (`portal/internal/server/containers.go:143`, the line itself at `containers.go:150`). "A container stopped" is then a value changing from 1 to 0, which a rule can see. If stopped containers were left out, the series would just stop, and missing data is much harder to alert on.
 
 **Scrape config.** `monitoring/scrape.yml` lists **jobs** (`node` at `scrape.yml:41`, `portal` at `scrape.yml:48`), each with **targets** (addresses). Every series gets `job` and `instance` labels, and the scraper adds an `up` series per target.
@@ -186,7 +186,7 @@ Result on 13 Nov: about 3,500 series in total, 24 of them `portal_container_up`,
 - `Query` (`metricsdb.go:119`): evaluate an expression at one moment, giving one value per series. Example: "uptime so far today".
 - `QueryRange` (`metricsdb.go:131`): evaluate the same expression at start, start+step, start+2·step… That is one line on a chart. The **step** sets the chart's resolution, not the scrape interval. `/graphs` picks the step so every range draws about 360 points (`portal/internal/server/graphs.go:37`): 10 s for 1 hour, 2 h for 30 days.
 
-**`rate()`.** A counter like `node_cpu_seconds_total` only grows. `rate(x[5m])` takes the samples of the last 5 minutes and returns the increase per second. CPU busy % is then `100 - idle rate × 100` (`graphs.go:72`). The window must be at least as long as the step, otherwise a 2-hour step with a 5-minute window looks at only 5 minutes of every 120 (`graphs.go:52`, `rateWindow` at `graphs.go:213`).
+**`rate()`.** A counter like `node_cpu_seconds_total` only grows. `rate(x[5m])` takes the samples of the last 5 minutes and returns the increase per second. CPU busy % is then `100 - idle rate × 100` (`graphs.go:78`). The window must be at least as long as the step, otherwise a 2-hour step with a 5-minute window looks at only 5 minutes of every 120 (`graphs.go:52`, `rateWindow` at `graphs.go:225`).
 
 **Retention.** Old data is deleted automatically after 30 days (`compose.monitoring.yml:107`). The uptime bars therefore show 30 days.
 
@@ -347,7 +347,30 @@ The same directory matters because a rename across filesystems is a copy plus a 
 
 Access to `/var/run/docker.sock` is root on the host: whoever can talk to it can start a privileged container that mounts `/`. So nothing here talks to it directly. Two separate proxies each allow a different, minimal set of calls (section 8 has the first one):
 
-- **Portal's proxy** allows `GET` container list and stats, and `POST` restart (`docker-compose.yml:116-117`). No network at all (`docker-compose.yml:118`). Its socket is in `run/portal/`, and that is the only part of `run/` Portal mounts (`docker-compose.yml:82`).
+- **Portal's proxy** allows `GET` container list and stats, and `POST` restart (`docker-compose.yml:130-131`). No network at all (`docker-compose.yml:132`). Its socket is in `run/portal/`, and that is the only part of `run/` Portal mounts (`docker-compose.yml:89`).
 - **The backup proxy** allows only what `docker exec … pg_dump` needs in the two Postgres containers: inspect them, create an exec, start it, read its exit code, ping (`compose.backup.yml:168`, `compose.backup.yml:170`). Its socket is mode 600 and owned by root (`compose.backup.yml:159`), in a named Docker volume that only these two containers mount (`compose.backup.yml:112`, `compose.backup.yml:182`). Not even uid 1000 on the host can reach it.
 
 **The limit, stated in the file** (`compose.backup.yml:129`): the proxy filters only the method and path of a request, never its body. The body of an exec-create request chooses the command and can ask for `"Privileged": true`. So whoever controls the backup container can run anything as root in those two Postgres containers, and from there reach the host. Least privilege made the door narrow. It is still a door. The rest of the defence is around it: no listening ports, three capabilities, strict validation of Portal's request files (`backup/scripts/watcher.sh:67`), sanitised status (section 17), and children started with an empty environment (`backup/scripts/lib.sh:103`), so sqlite3 or tar never inherit the restic password or ntfy token.
+
+## 20. Where does the RAM go? RSS, PSS, page cache and cgroups
+
+`free` says "used 2.7 GB" but not *by whom*. The Memory panel answers that by splitting `MemTotal` into groups that add up, and the parts are worth understanding one by one.
+
+**Page cache is not "used".** Linux keeps the contents of recently read files in RAM, because spare RAM is wasted RAM. When a program asks for memory, the kernel drops clean cache pages instantly. That is why `free` shows a big `buff/cache` and a much bigger `available` than `free`. The panel puts `Cached + Buffers + SReclaimable - Shmem` in one "Page cache" group (`portal/internal/procmem/procmem.go:372`) and says in plain words that it is lent, not taken.
+
+**RSS counts shared pages more than once.** `VmRSS` in `/proc/<pid>/status` is every page a process has in RAM: its own heap (`RssAnon`), mapped files such as its binary and libraries (`RssFile`), and shared memory (`RssShmem`). Ten processes using the same library each count it. Summing RSS over all processes therefore says more than the machine has. Two ways out:
+
+- **PSS** (proportional set size, in `/proc/<pid>/smaps_rollup`) divides each shared page by the number of processes sharing it, so the sum is honest. Reading it needs ptrace-level access. Docker's AppArmor profile refuses that for processes outside the container, so Portal does not use it.
+- **Leave file pages out.** `RssFile` pages already sit in the page cache group. Charging a process only `RssAnon + RssShmem` (`procmem.go:513`) avoids counting them twice. On this machine the sum over all processes matches meminfo's `AnonPages + Shmem` within about 1%. Portal uses this.
+
+**cgroups tell you which container a process is in.** `/proc/<pid>/cgroup` shows the cgroup path, for example `0::/system.slice/docker-<64 hex>.scope`. The id in it is the container id from the Docker API, which also carries the compose project label (`procmem.go:157`, matched at `procmem.go:241`). Portal sums the processes of each container itself rather than using `docker stats`. Docker's figure includes the container's *active* page cache, which is already in the cache group.
+
+**Groups come from the process tree.** A `claude` process and all of its descendants form one Claude Code session (`procmem.go:221`). `dockerd`, `containerd` and the shims are the Docker engine (`procmem.go:271`). Everything else is split by uid into your own processes and system services (`procmem.go:281`). The kernel's own memory (unreclaimable slab, page tables, stacks, vmalloc) comes straight from `/proc/meminfo` (`procmem.go:360`).
+
+**Be honest about the remainder.** Whatever is left is reported as "unaccounted" (`procmem.go:385`): memory the kernel holds that no file attributes (graphics buffers, drivers), minus anonymous pages shared after `fork()` and counted twice. It is usually around 1% here. If it ever went negative, the panel would show a negative number instead of hiding it.
+
+**Reading /proc safely and cheaply.** Processes come and go while you read, so every file is read once and any error drops only that process (`procmem.go:169`). Kernel threads have no `VmRSS` line and are skipped (`procmem.go:487`). A scan of ~140 processes takes about 4 ms (12 ms inside the container). It runs every 10 s while a dashboard is open and every 60 s otherwise (`portal/internal/server/dashboard.go:552`, `portal/internal/server/memory.go:44`). Only nine low-cardinality series leave the process (`memory.go:297`). Per-pid series would create a new time series for every short-lived process.
+
+**Command lines leak secrets.** `/proc/<pid>/cmdline` is world-readable, and tools still put tokens there. Before anything reaches the page, `Sanitize` (`procmem.go:679`) keeps only the program's base name and replaces values after `--token`, `--password`, `-p`, `-H`, `KEY=...`, `Authorization`/`Bearer` and URL credentials with `***`.
+
+Further reading: `man 5 proc` (the `status`, `smaps_rollup` and `meminfo` entries); the kernel's `Documentation/admin-guide/cgroup-v2.rst`.

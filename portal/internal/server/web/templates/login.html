@@ -4,43 +4,40 @@
 {{template "head" .}}
 <title>Sign in · exp.lab</title>
 </head>
-<body class="login-body">
-{{template "icons"}}
-<main class="login">
-  <div class="login-card">
-    {{template "brand"}}
-    <h1>Sign in</h1>
-    <p class="login-sub">
-      {{if .NextHost}}to continue to <span class="mono">{{.NextHost}}</span>{{else}}to open your dashboard{{end}}
-    </p>
+<body>
+<div class="wrap">
+<header class="strip"><span class="host">exp.lab</span><span class="meta"><span>Portal</span></span></header>
+<main class="solo">
+  <h1>Sign in</h1>
+  <p class="sub">{{if .NextHost}}to continue to <span class="mono">{{.NextHost}}</span>{{else}}to open the dashboard{{end}}</p>
 
-    {{if .NoPass}}
-    <div class="notice" role="alert">
-      <strong>No password has been set yet.</strong>
-      <span>On the server, run:</span>
-      <code>{{.Setup}}</code>
-    </div>
-    {{else}}
-    {{if .Error}}<p class="form-error" role="alert">{{.Error}}</p>{{end}}
-    <form method="post" action="/login" class="login-form">
-      <input type="hidden" name="next" value="{{.Next}}">
-      {{/* A hidden username lets password managers file the entry properly. */}}
-      <input class="visually-hidden" type="text" name="username" value="{{.User}}" autocomplete="username" tabindex="-1" aria-hidden="true" readonly>
-      <label class="field">
-        <span>Password</span>
-        <input type="password" name="password" autocomplete="current-password" required autofocus>
-      </label>
-      {{if .TOTP}}
-      <label class="field">
-        <span>Authenticator code</span>
-        <input class="mono code-input" type="text" name="code" inputmode="numeric" pattern="[0-9 ]*" maxlength="7" autocomplete="one-time-code" placeholder="000000" required>
-      </label>
-      {{end}}
-      <button class="btn primary" type="submit"><svg class="ico"><use href="#i-lock"/></svg>Sign in</button>
-    </form>
-    {{end}}
+  {{if .NoPass}}
+  <div class="setup" role="alert">
+    <strong>No password has been set yet.</strong>
+    <span>On the server, run:</span>
+    <code>{{.Setup}}</code>
   </div>
-  <p class="login-foot">Private. Reachable over Tailscale only.</p>
+  {{else}}
+  {{if .Error}}<p class="err" role="alert">{{.Error}}</p>{{end}}
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="{{.Next}}">
+    {{/* A hidden username lets password managers file the entry properly. */}}
+    <input class="visually-hidden" type="text" name="username" value="{{.User}}" autocomplete="username" tabindex="-1" aria-hidden="true" readonly>
+    <label class="field">
+      <span>Password</span>
+      <input type="password" name="password" autocomplete="current-password" required autofocus>
+    </label>
+    {{if .TOTP}}
+    <label class="field">
+      <span>Authenticator code</span>
+      <input class="mono code-input" type="text" name="code" inputmode="numeric" pattern="[0-9 ]*" maxlength="7" autocomplete="one-time-code" placeholder="000000" required>
+    </label>
+    {{end}}
+    <button class="btn primary" type="submit">Sign in</button>
+  </form>
+  {{end}}
 </main>
+<p class="solo-foot">Private. Reachable over Tailscale only.</p>
+</div>
 </body>
 </html>

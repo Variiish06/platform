@@ -18,53 +18,72 @@ import (
 // Formatting happens here, once, in Go. The first page load and every
 // live update go through the same functions, so they can never disagree.
 
-// statView is one cell of the System panel. The JSON names are short
+// statView is one reading of the System row. The JSON names are short
 // because this struct is also sent to the browser every few seconds.
 type statView struct {
 	Key   string  `json:"k"`
 	Label string  `json:"l"`
 	Value string  `json:"v"`
 	Sub   string  `json:"s"`
-	Pct   float64 `json:"p"`  // bar fill 0..100, or -1 for "no bar"
+	Pct   float64 `json:"p"`  // meter fill 0..100, or -1 for "no meter"
 	State string  `json:"st"` // "", "warn" or "bad"
 	// Hist is the recent CPU history ("3.1,4.0,..."), only set on the CPU
-	// cell of a full page load so the sparkline is not empty at first.
+	// reading of a full page load so the sparkline is not empty at first.
 	Hist string `json:"-"`
 }
 
 type appView struct {
 	Name, Desc, Icon, Host, URL string
 	State                       string // up, down, unknown
-	Detail                      string // "Up · 12 ms", "Down · connection refused"
+	Detail                      string // "connection refused" when down, "checking" when unknown
+	Latency                     string // "5 ms" when up
 	Open                        bool   // no Portal login in front of it
 	Uptime                      uptimeView
 }
 
 type appsData struct {
+	Span        string // what the uptime history covers, from the first app with data
 	Tiles       []appView
 	Up, Total   int
 	ConfigError string
 }
 
 type containerView struct {
-	ID, Name, Status, State, Mem string
-	CPU                          string // "3.2%" or "" until two samples exist
-	Running                      bool
+	ID, Name, Project, State string
+	Status                   string // Docker's own words, for the tooltip
+	Uptime                   string // "2 days", "33 hours"; for stopped ones "exited 6 min ago"
+	Health                   string // "unhealthy", "starting" or ""
+	Mem                      string // "46.0 MiB" or "–"
+	MemBytes                 uint64
+	MemPct                   string // bar width relative to the largest container
+	CPU                      string // "3.2%" or "" until two samples exist
+	CPUVal                   float64
+	Running                  bool
 }
 
 type containersData struct {
 	Rows           []containerView
 	Running, Total int
+	Projects       int
+	MemTotal       string
 	Error          string
 }
 
+type headerData struct {
+	Host, Uptime, Since, Time, TimeISO string
+}
+
 type dashboardPage struct {
-	V, Host, User string
-	Stats         []statView
-	Apps          appsData
-	Containers    containersData
-	Notify        notifData
-	Backup        backupData
+	V, User    string
+	Page       string // "dashboard": marks the current link in the strip
+	Header     headerData
+	Status     statusView
+	Stats      []statView
+	Apps       appsData
+	Memory     memView
+	Containers containersData
+	Notify     notifData
+	Backup     backupData
 }
 
 // level turns a number into "", "warn" or "bad" against two thresholds.
@@ -88,14 +107,10 @@ func pct(used, total uint64) float64 {
 }
 
 func fmtBytes(b uint64) string {
-	switch {
-	case b == 0:
+	if b == 0 {
 		return "–"
-	case b >= 1<<30:
-		return fmt.Sprintf("%.1f GB", gb(b))
-	default:
-		return fmt.Sprintf("%.0f MB", float64(b)/(1<<20))
 	}
+	return fmtMem(int64(b))
 }
 
 func fmtUptime(d time.Duration) string {
@@ -109,24 +124,27 @@ func fmtUptime(d time.Duration) string {
 	return fmt.Sprintf("%dm", mins)
 }
 
-// buildStats turns a raw snapshot into the System panel's cells.
+// buildStats turns a raw snapshot into the System readings.
 func buildStats(s sysinfo.Snapshot) []statView {
+	memPct, diskPct := pct(s.MemUsed, s.MemTotal), pct(s.DiskUsed, s.DiskTotal)
 	out := []statView{
 		{Key: "cpu", Label: "CPU", Value: fmt.Sprintf("%.0f%%", s.CPUPercent),
-			Sub: fmt.Sprintf("load %.2f · %d cores", s.Load1, s.Cores),
-			Pct: s.CPUPercent, State: level(s.CPUPercent, 80, 95)},
-		{Key: "mem", Label: "Memory", Value: fmt.Sprintf("%.1f / %.1f GB", gb(s.MemUsed), gb(s.MemTotal)),
-			Sub: fmt.Sprintf("%.0f%% used", pct(s.MemUsed, s.MemTotal)),
-			Pct: pct(s.MemUsed, s.MemTotal), State: level(pct(s.MemUsed, s.MemTotal), 85, 95)},
-		{Key: "disk", Label: "Disk", Value: fmt.Sprintf("%.0f / %.0f GB", gb(s.DiskUsed), gb(s.DiskTotal)),
-			Sub: fmt.Sprintf("%.0f%% used", pct(s.DiskUsed, s.DiskTotal)),
-			Pct: pct(s.DiskUsed, s.DiskTotal), State: level(pct(s.DiskUsed, s.DiskTotal), 80, 92)},
+			Sub: fmt.Sprintf("%d cores", s.Cores), Pct: -1, State: level(s.CPUPercent, 80, 95)},
+		{Key: "load", Label: "Load 1/5/15", Value: fmt.Sprintf("%.2f", s.Load1),
+			Sub: fmt.Sprintf("%.2f  %.2f", s.Load5, s.Load15), Pct: -1,
+			State: level(s.Load1/float64(max(1, s.Cores)), 1.5, 3)},
+		{Key: "mem", Label: "Memory", Value: fmt.Sprintf("%.1f GiB", gb(s.MemUsed)),
+			Sub: fmt.Sprintf("of %.1f · %.0f%%", gb(s.MemTotal), memPct),
+			Pct: memPct, State: level(memPct, 90, 97)},
+		{Key: "disk", Label: "Disk", Value: fmt.Sprintf("%.0f GiB", gb(s.DiskUsed)),
+			Sub: fmt.Sprintf("of %.0f · %.0f%%", gb(s.DiskTotal), diskPct),
+			Pct: diskPct, State: level(diskPct, 80, 92)},
 	}
 
-	temp := statView{Key: "temp", Label: "CPU temp", Value: "–", Sub: "no sensor", Pct: -1}
+	temp := statView{Key: "temp", Label: "Temp", Value: "–", Sub: "no sensor", Pct: -1}
 	if s.TempOK {
-		temp.Value, temp.Sub = fmt.Sprintf("%.0f°C", s.TempC), "normal"
-		temp.Pct, temp.State = s.TempC, level(s.TempC, 75, 90)
+		temp.Value, temp.Sub = fmt.Sprintf("%.0f °C", s.TempC), "CPU package"
+		temp.State = level(s.TempC, 75, 90)
 		switch temp.State {
 		case "warn":
 			temp.Sub = "running warm"
@@ -136,18 +154,14 @@ func buildStats(s sysinfo.Snapshot) []statView {
 	}
 	out = append(out, temp)
 
-	bat := statView{Key: "battery", Label: "Battery", Value: "–", Sub: "no battery", Pct: -1}
+	bat := statView{Key: "power", Label: "Power", Value: "–", Sub: "no battery", Pct: -1}
 	if s.BatteryOK {
-		bat.Value, bat.Pct = fmt.Sprintf("%d%%", s.BatteryPercent), float64(s.BatteryPercent)
-		power := "on battery"
-		if s.ACOnline {
-			power = "plugged in"
-		}
-		bat.Sub = s.BatteryStatus + " · " + power
+		bat.Value = fmt.Sprintf("%d%%", s.BatteryPercent)
+		bat.Sub = "on AC · " + strings.ToLower(s.BatteryStatus)
 		// A server on battery means the charger fell out or the power is
 		// off: worth a warning long before the charge is actually low.
 		if !s.ACOnline {
-			bat.State = "warn"
+			bat.Sub, bat.State = "ON BATTERY", "warn"
 			if s.BatteryPercent < 20 {
 				bat.State = "bad"
 			}
@@ -157,23 +171,23 @@ func buildStats(s sysinfo.Snapshot) []statView {
 
 	wifi := statView{Key: "wifi", Label: "WiFi", Value: "–", Sub: "not connected", Pct: -1}
 	if s.WiFiOK {
-		quality := "Weak"
+		quality := "weak"
 		switch {
 		case s.WiFiDBm >= -55:
-			quality = "Excellent"
+			quality = "excellent"
 		case s.WiFiDBm >= -67:
-			quality = "Good"
+			quality = "good"
 		case s.WiFiDBm >= -75:
-			quality = "Fair"
+			quality = "fair"
 		}
-		wifi.Value, wifi.Sub = fmt.Sprintf("%d dBm", s.WiFiDBm), quality+" · "+s.WiFiIface
-		wifi.Pct = 100 * float64(s.WiFiQuality) / 70 // the kernel reports link quality out of 70
+		wifi.Value, wifi.Sub = fmt.Sprintf("%d dBm", s.WiFiDBm), quality
 		// dBm is negative: closer to zero is stronger.
 		wifi.State = level(float64(-s.WiFiDBm), 72, 82)
 	}
 	out = append(out, wifi)
 
-	out = append(out, statView{Key: "uptime", Label: "Uptime", Value: fmtUptime(s.Uptime),
+	// Shown in the header strip, patched by the same JSON.
+	out = append(out, statView{Key: "uptime", Label: "Up", Value: fmtUptime(s.Uptime),
 		Sub: "since " + s.At.Add(-s.Uptime).Format("2 Jan"), Pct: -1})
 	return out
 }
@@ -183,21 +197,55 @@ func (s *Server) appsView() appsData {
 	for _, a := range s.apps.List() {
 		host := s.apps.Host(a)
 		v := appView{Name: a.Name, Desc: a.Description, Icon: a.Icon, Host: host,
-			URL: s.cfg.Scheme() + "://" + host + "/", State: "unknown", Detail: "Checking", Open: !a.RequiresAuth()}
+			URL: s.cfg.Scheme() + "://" + host + "/", State: "unknown", Detail: "checking", Open: !a.RequiresAuth()}
 		if st, ok := s.apps.Status(a.ID); ok {
 			if st.Up {
-				v.State = "up"
-				v.Detail = fmt.Sprintf("Up · %d ms", max(1, st.Latency.Milliseconds()))
+				v.State, v.Detail = "up", ""
+				v.Latency = fmt.Sprintf("%d ms", max(1, st.Latency.Milliseconds()))
 				d.Up++
 			} else {
-				v.State, v.Detail = "down", "Down · "+st.Err
+				v.State, v.Detail = "down", st.Err
 			}
 		}
 		v.Uptime = s.uptimeFor(a.ID)
+		if d.Span == "" {
+			d.Span = v.Uptime.Span
+		}
 		d.Tiles = append(d.Tiles, v)
 	}
 	d.Total = len(d.Tiles)
 	return d
+}
+
+// containerUptime turns Docker's status text into the table's columns:
+// "Up 2 days (healthy)" -> ("2 days", ""), "Up 3 hours (unhealthy)" ->
+// ("3 hours", "unhealthy"), "Exited (0) 6 minutes ago" -> ("exited 6 min
+// ago", "").
+func containerUptime(status string) (uptime, health string) {
+	st := strings.TrimSpace(status)
+	for _, h := range []string{"unhealthy", "health: starting"} {
+		if strings.Contains(st, "("+h+")") {
+			health = strings.TrimPrefix(h, "health: ")
+		}
+	}
+	if i := strings.Index(st, " ("); i >= 0 && strings.HasPrefix(st, "Up ") {
+		st = st[:i]
+	}
+	switch {
+	case strings.HasPrefix(st, "Up "):
+		uptime = strings.TrimPrefix(st, "Up ")
+	case strings.HasPrefix(st, "Exited"):
+		if i := strings.Index(st, ") "); i >= 0 {
+			uptime = "exited " + st[i+2:]
+		} else {
+			uptime = "exited"
+		}
+	default:
+		uptime = strings.ToLower(st)
+	}
+	r := strings.NewReplacer("About an hour", "1 hour", "About a minute", "1 minute", "Less than a second", "0 seconds",
+		" minutes", " min", " minute", " min", " seconds", " s", " second", " s")
+	return r.Replace(uptime), health
 }
 
 func (s *Server) containersView() containersData {
@@ -205,17 +253,34 @@ func (s *Server) containersView() containersData {
 	list, errText := s.containers, s.dockerErr
 	s.mu.RUnlock()
 	d := containersData{Error: errText, Total: len(list)}
+	var top, sum uint64
+	projects := map[string]bool{}
+	for _, c := range list {
+		top = max(top, c.MemBytes)
+		sum += c.MemBytes
+	}
 	for _, c := range list {
 		if c.Running() {
 			d.Running++
 		}
-		v := containerView{ID: c.ID, Name: c.Name, Status: c.Status, State: c.State,
-			Mem: fmtBytes(c.MemBytes), Running: c.Running()}
+		v := containerView{ID: c.ID, Name: c.Name, Project: c.Project, Status: c.Status, State: c.State,
+			Mem: fmtBytes(c.MemBytes), MemBytes: c.MemBytes, MemPct: "0", Running: c.Running()}
+		if v.Project == "" {
+			v.Project = "–"
+		} else {
+			projects[v.Project] = true
+		}
+		v.Uptime, v.Health = containerUptime(c.Status)
+		if top > 0 && c.MemBytes > 0 {
+			v.MemPct = fmt.Sprintf("%.1f", 100*float64(c.MemBytes)/float64(top))
+		}
 		if c.CPUOK {
-			v.CPU = fmtCPU(c.CPUPercent)
+			v.CPU, v.CPUVal = fmtCPU(c.CPUPercent), c.CPUPercent
 		}
 		d.Rows = append(d.Rows, v)
 	}
+	d.Projects = len(projects)
+	d.MemTotal = fmtBytes(sum)
 	return d
 }
 
@@ -225,6 +290,15 @@ func fmtCPU(p float64) string {
 		return fmt.Sprintf("%.1f%%", p)
 	}
 	return fmt.Sprintf("%.0f%%", p)
+}
+
+func (s *Server) headerView() headerData {
+	s.mu.RLock()
+	sys := s.lastSys
+	s.mu.RUnlock()
+	now := time.Now()
+	return headerData{Host: s.hostname, Uptime: fmtUptime(sys.Uptime), Since: "since " + now.Add(-sys.Uptime).Format("2 Jan"),
+		Time: now.Format("15:04"), TimeISO: now.Format(time.RFC3339)}
 }
 
 // ---- Handlers ----
@@ -249,8 +323,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 	stats[0].Hist = strings.Join(hist, ",") // stats[0] is the CPU cell
 	s.render(w, http.StatusOK, "dashboard.html", dashboardPage{
-		V: s.version, Host: s.hostname, User: s.cfg.User,
-		Stats: stats, Apps: s.appsView(), Containers: s.containersView(),
+		V: s.version, User: s.cfg.User, Page: "dashboard", Header: s.headerView(), Status: s.statusView(),
+		Stats: stats, Apps: s.appsView(), Memory: s.memoryView(), Containers: s.containersView(),
 		Notify: s.notifView(), Backup: s.backupView(),
 	})
 }
@@ -385,14 +459,17 @@ func (s *Server) publishSystem() {
 	s.mu.RUnlock()
 	b, _ := json.Marshal(buildStats(snap))
 	s.hub.Publish("system", string(b))
+	s.publishStatus() // the sentence mentions memory, disk, temperature, battery
 }
 
 func (s *Server) publishApps() {
 	s.hub.Publish("apps", strings.TrimSpace(s.fragment("apps", s.appsView())))
+	s.publishStatus()
 }
 
 func (s *Server) publishContainers() {
 	s.hub.Publish("containers", strings.TrimSpace(s.fragment("containers", s.containersView())))
+	s.publishStatus()
 }
 
 // startBackground launches the loops that keep the dashboard current.
@@ -457,6 +534,36 @@ func (s *Server) startBackground(ctx context.Context) {
 		s.collectContainers(ctx)
 		s.publishContainers()
 	})
+
+	// Memory breakdown: scan the host's processes every 10 s while a
+	// dashboard is open, otherwise every 60 s (it also feeds /metrics). The
+	// first scan waits for the first container list, so container
+	// processes get their names.
+	if s.memScan != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
+			s.collectMemory()
+			s.publishMemory()
+		}()
+		every(memFastInterval, func() {
+			s.mu.RLock()
+			age := time.Since(s.mem.At)
+			s.mu.RUnlock()
+			if s.hub.Count() == 0 && age < memSlowInterval-time.Second {
+				return
+			}
+			s.collectMemory()
+			s.publishMemory()
+		})
+	}
+
+	// Firing alerts, for the status sentence.
+	go s.refreshAlerts(ctx)
+	every(alertsInterval, func() { s.refreshAlerts(ctx) })
 
 	// Uptime bars: ask VictoriaMetrics every 5 minutes (daily numbers do
 	// not move faster than that). The first fetch waits a few seconds so

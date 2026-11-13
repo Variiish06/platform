@@ -1,17 +1,21 @@
 // Dashboard live updates. No framework: the server renders HTML, and this
 // file only (1) listens to the event stream and swaps content in, and
-// (2) handles the restart and backup buttons.
+// (2) handles sorting, the restart and the backup buttons.
 (function () {
   'use strict';
   const $ = (sel, root) => (root || document).querySelector(sel);
+  const $$ = (sel, root) => (root || document).querySelectorAll(sel);
 
   // ---- Bars -------------------------------------------------------------
-  // Bar widths arrive as data-pct attributes and are applied here, because
+  // Widths arrive as data-pct attributes and are applied here, because
   // the Content-Security-Policy forbids inline style="" attributes.
   function applyBars(root) {
-    root.querySelectorAll('[data-pct]').forEach(function (el) {
+    $$('[data-pct]', root).forEach(function (el) {
       const p = Math.max(0, Math.min(100, parseFloat(el.dataset.pct) || 0));
-      el.style.width = p + '%';
+      // The memory bar is a flex row: grow by share so 1 px gaps never
+      // push the total past 100%.
+      if (el.parentElement && el.parentElement.classList.contains('mbar')) el.style.flex = p + ' 0 0';
+      else el.style.width = p + '%';
     });
   }
 
@@ -28,27 +32,29 @@
     const step = 120 / 59;
     const start = 60 - cpuHistory.length;
     line.setAttribute('points', cpuHistory.map(function (v, i) {
-      return ((start + i) * step).toFixed(1) + ',' + (34 - (v / top) * 32).toFixed(1);
+      return ((start + i) * step).toFixed(1) + ',' + (17 - (v / top) * 16).toFixed(1);
     }).join(' '));
   }
 
-  // ---- System panel: patch values in place ------------------------------
-  // The cells keep their DOM nodes, so the bars can animate between values.
+  // ---- System readings: patch values in place ----------------------------
   function updateStats(stats) {
     stats.forEach(function (s) {
-      const cell = $('.stat[data-key="' + s.k + '"]');
+      const cell = $('[data-key="' + s.k + '"]');
       if (!cell) return;
-      cell.dataset.state = s.st;
-      $('[data-f="v"]', cell).textContent = s.v;
-      $('[data-f="s"]', cell).textContent = s.s;
-      const bar = $('.bar', cell);
-      bar.classList.toggle('none', s.p < 0);
-      $('i', bar).style.width = Math.max(0, Math.min(100, s.p)) + '%';
-      if (s.k === 'cpu') drawSpark(s.p);
+      if (cell.classList.contains('rd')) cell.dataset.state = s.st;
+      const v = $('[data-f="v"]', cell), sub = $('[data-f="s"]', cell);
+      if (v) v.textContent = s.v;
+      if (sub) sub.textContent = s.s;
+      const meter = $('.meter', cell);
+      if (meter) {
+        meter.classList.toggle('none', s.p < 0);
+        $('i', meter).style.width = Math.max(0, Math.min(100, s.p)) + '%';
+      }
+      if (s.k === 'cpu') drawSpark(parseFloat(s.v) || 0);
     });
   }
 
-  // ---- Notification times -------------------------------------------------
+  // ---- Relative times -----------------------------------------------------
   // "5 min ago" goes stale while the page is open; recompute it from the
   // timestamp the server put in data-ts. Same rules as ago() in notify.go.
   function relTime(ts) {
@@ -59,19 +65,77 @@
     return Math.floor(s / 86400) + ' d ago';
   }
   function updateTimes() {
-    document.querySelectorAll('time[data-ts]').forEach(function (el) {
+    $$('time[data-ts]').forEach(function (el) {
       el.textContent = relTime(parseInt(el.dataset.ts, 10) || 0);
     });
   }
   setInterval(updateTimes, 30000);
 
+  // ---- Container table sorting --------------------------------------------
+  // Stopped containers always sit at the bottom; within each part the rows
+  // follow the chosen column. The choice survives live updates and reloads.
+  let sortBy = { key: 'project', dir: 'asc' };
+  try { sortBy = JSON.parse(localStorage.getItem('portal.containers.sort')) || sortBy; } catch (e) { /* ignore */ }
+  function sortContainers() {
+    const body = $('#containers tbody');
+    if (!body) return;
+    const rows = [].slice.call(body.rows);
+    const numeric = sortBy.key === 'cpu' || sortBy.key === 'mem';
+    const sign = sortBy.dir === 'asc' ? 1 : -1;
+    rows.sort(function (a, b) {
+      const ra = a.dataset.run === 'true', rb = b.dataset.run === 'true';
+      if (ra !== rb) return ra ? -1 : 1;
+      let c = 0;
+      if (numeric) c = (parseFloat(a.dataset[sortBy.key]) || 0) - (parseFloat(b.dataset[sortBy.key]) || 0);
+      else c = (a.dataset[sortBy.key] || '').localeCompare(b.dataset[sortBy.key] || '');
+      if (c === 0) c = sign * (a.dataset.name || '').localeCompare(b.dataset.name || '');
+      return sign * c;
+    });
+    rows.forEach(function (r) { body.appendChild(r); });
+    $$('#containers .sort').forEach(function (b) {
+      if (b.dataset.sort === sortBy.key) b.setAttribute('aria-sort-dir', sortBy.dir);
+      else b.removeAttribute('aria-sort-dir');
+      const th = b.closest('th');
+      if (th) th.setAttribute('aria-sort', b.dataset.sort === sortBy.key ? (sortBy.dir === 'asc' ? 'ascending' : 'descending') : 'none');
+    });
+  }
+  document.addEventListener('click', function (e) {
+    const b = e.target.closest('.sort');
+    if (!b) return;
+    const key = b.dataset.sort;
+    if (sortBy.key === key) sortBy.dir = sortBy.dir === 'asc' ? 'desc' : 'asc';
+    else sortBy = { key: key, dir: key === 'cpu' || key === 'mem' ? 'desc' : 'asc' };
+    try { localStorage.setItem('portal.containers.sort', JSON.stringify(sortBy)); } catch (err) { /* ignore */ }
+    sortContainers();
+  });
+
+  // ---- Swapping in a fragment ------------------------------------------------
+  // Open <details> (memory groups, older notifications) stay open across
+  // updates: remember them by data-k and reopen after the swap.
+  function swap(el, html, fade) {
+    if (!el) return;
+    const open = new Set();
+    $$('details[open][data-k]', el).forEach(function (d) { open.add(d.dataset.k); });
+    const focusedSort = document.activeElement && el.contains(document.activeElement) && document.activeElement.dataset.sort;
+    el.innerHTML = html;
+    $$('details[data-k]', el).forEach(function (d) { if (open.has(d.dataset.k)) d.open = true; });
+    applyBars(el);
+    updateTimes();
+    if (focusedSort) { const b = $('.sort[data-sort="' + focusedSort + '"]', el); if (b) b.focus(); }
+    if (fade) {
+      el.classList.remove('fresh');
+      void el.offsetWidth; // restart the animation
+      el.classList.add('fresh');
+    }
+  }
+
   // ---- Event stream ------------------------------------------------------
   const live = $('#live'), liveText = $('#live-text');
-  function setLive(state, text) { live.dataset.state = state; liveText.textContent = text; }
+  function setLive(state, text) { if (live) { live.dataset.state = state; liveText.textContent = text; } }
 
   const busy = new Set(); // container ids with a restart in flight
   function markBusy() {
-    document.querySelectorAll('.row').forEach(function (row) {
+    $$('#containers tr[data-id]').forEach(function (row) {
       row.classList.toggle('busy', busy.has(row.dataset.id));
     });
   }
@@ -80,10 +144,10 @@
   function connect() {
     if (source) source.close();
     source = new EventSource('/events');
-    source.onopen = function () { failures = 0; setLive('live', 'Live'); };
+    source.onopen = function () { failures = 0; setLive('live', 'live'); };
     source.onerror = function () {
       failures++;
-      setLive(failures > 2 ? 'offline' : 'connecting', failures > 2 ? 'Offline' : 'Reconnecting');
+      setLive(failures > 2 ? 'offline' : 'connecting', failures > 2 ? 'offline' : 'reconnecting');
       // EventSource retries by itself. But if the session ended, retrying
       // will never work: ask the server and go to the login page if so.
       if (failures === 2) {
@@ -93,13 +157,15 @@
       }
       if (source.readyState === EventSource.CLOSED) setTimeout(connect, 3000);
     };
-    // "apps", "containers" and "notify" carry ready-made HTML from the server's
-    // templates; "system" carries JSON for in-place patching.
-    source.addEventListener('apps', function (e) { $('#apps').innerHTML = e.data; });
-    source.addEventListener('containers', function (e) { $('#containers').innerHTML = e.data; markBusy(); });
+    // Most events carry ready-made HTML from the server's templates;
+    // "system" carries JSON for in-place patching.
+    source.addEventListener('status', function (e) { swap($('#status'), e.data, true); });
+    source.addEventListener('apps', function (e) { swap($('#apps'), e.data, false); });
+    source.addEventListener('memory', function (e) { swap($('#memory'), e.data, false); });
+    source.addEventListener('containers', function (e) { swap($('#containers'), e.data, false); sortContainers(); markBusy(); });
     source.addEventListener('system', function (e) { updateStats(JSON.parse(e.data)); });
-    source.addEventListener('notify', function (e) { $('#notify').innerHTML = e.data; updateTimes(); });
-    source.addEventListener('backup', function (e) { $('#backup').innerHTML = e.data; updateTimes(); });
+    source.addEventListener('notify', function (e) { swap($('#notify'), e.data, true); });
+    source.addEventListener('backup', function (e) { swap($('#backup'), e.data, true); });
   }
 
   // Phones suspend background tabs and silently kill the connection.
@@ -162,7 +228,7 @@
   // does the work. The panel then shows "Requested…" and, a few seconds
   // later, "Backing up…" as status.json changes (pushed over /events).
   function backupPost(path, body, label) {
-    document.querySelectorAll('[data-backup]').forEach(function (b) { b.disabled = true; });
+    $$('[data-backup]').forEach(function (b) { b.disabled = true; });
     return fetch(path, {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -172,11 +238,11 @@
       return r.json().catch(function () { return {}; }).then(function (j) {
         if (r.ok) { toast(label + ' requested. It starts within a few seconds.'); return; }
         toast(j.error || ('Request failed (' + r.status + ')'), true);
-        document.querySelectorAll('[data-backup]').forEach(function (b) { b.disabled = false; });
+        $$('[data-backup]').forEach(function (b) { b.disabled = false; });
       });
     }).catch(function () {
       toast('Could not reach Portal.', true);
-      document.querySelectorAll('[data-backup]').forEach(function (b) { b.disabled = false; });
+      $$('[data-backup]').forEach(function (b) { b.disabled = false; });
     });
   }
 
@@ -210,6 +276,7 @@
   }
 
   applyBars(document);
+  sortContainers();
   // Seed the sparkline with the history the server put in the page.
   const spark = $('.spark');
   if (spark && spark.dataset.hist) spark.dataset.hist.split(',').forEach(function (v) { drawSpark(parseFloat(v) || 0); });

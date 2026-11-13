@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Metrics counts events for the /metrics endpoint.
@@ -186,6 +187,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	gauge("portal_docker_up", "1 if the last container collection round succeeded recently.", bool01(fresh && s.dockerError() == ""))
 	if fresh {
 		writeContainerMetrics(&b, containers)
+	}
+
+	if mb, _ := s.memSnapshot(); !mb.At.IsZero() && time.Since(mb.At) < memMetricsMaxAge {
+		writeMemoryMetrics(&b, mb)
 	}
 
 	s.mu.RLock()

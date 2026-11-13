@@ -171,6 +171,8 @@ type uptimeSeg struct {
 type uptimeView struct {
 	Segs  []uptimeSeg
 	Label string // "99.8% · 30d", "100% · since today", "No history yet"
+	Pct   string // just the percentage, or the note when there is no data
+	Span  string // what the history covers: "the last 30 days", "today only"
 	Aria  string // the whole bar in words, for screen readers
 	Level string // overall level, colours the label
 }
@@ -228,7 +230,7 @@ func buildUptimeView(a *appUptime, days [uptimeDays]time.Time, note string) upti
 		if note == "" {
 			note = "No history yet"
 		}
-		v.Label, v.Level = note, "none"
+		v.Label, v.Pct, v.Level = note, note, "none"
 		v.Aria = "Uptime history: " + strings.ToLower(note[:1]) + note[1:] + "."
 		return v
 	}
@@ -247,6 +249,13 @@ func buildUptimeView(a *appUptime, days [uptimeDays]time.Time, note string) upti
 		since = fmt.Sprintf("%dd", span)
 	}
 	v.Label = fmtUptimePct(overall, 1) + " · " + since
+	v.Pct = fmtUptimePct(overall, 1)
+	switch {
+	case span == 1:
+		v.Span = "today only"
+	default:
+		v.Span = fmt.Sprintf("the last %d days", span)
+	}
 	v.Level = uptimeLevel(overall)
 	v.Aria = fmt.Sprintf("Uptime %s over the last %s: %d of %d days with data at or above 99.9%%.",
 		fmtUptimePct(overall, 1), strings.TrimPrefix(since, "since "), withData-below, withData)
