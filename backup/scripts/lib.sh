@@ -73,7 +73,11 @@ WALKED_TREES=(/src/platform /src/focal /src/ritual /src/ledger /src/gitea)
 # "docker exec" through the backup socket proxy (compose.backup.yml).
 PG_DBS=(
   "dalal-postgres-1 dalal dalal"
-  "conveyor-postgres-1 conveyor conveyor"
+  # Conveyor was stopped on 13 Nov 2026 (to save RAM). pg_dump needs a running
+  # database, so it is not dumped while stopped: its last dump is in the
+  # snapshot of 13 Nov, and the data itself stays in the conveyor_pgdata volume.
+  # Uncomment when Conveyor runs again (then rebuild: docker compose up -d --build backup).
+  # "conveyor-postgres-1 conveyor conveyor"
 )
 
 # ---------------------------------------------------------------------------
