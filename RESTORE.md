@@ -298,8 +298,10 @@ Google account.
    rclone created it).
 5. **Start only the backup container** and check you can see your snapshots:
    ```sh
-   mkdir -p ~/restore-staging data/backup/requests run/textfile
+   mkdir -p ~/restore-staging data/backup/requests run/portal run/textfile secrets
+   chmod 700 secrets && [ -e secrets/rclone.conf ] || install -m 600 /dev/null secrets/rclone.conf   # must exist before the first start
    docker compose up -d --build backup docker-proxy-backup
+   backup/drive-setup.sh            # paste the token from step 4 (this is section 8, step 4)
    docker compose exec backup /scripts/restic.sh snapshots
    ```
    "wrong password" here means the password in `.env` is not the old one.

@@ -19,3 +19,6 @@ secrets/
 data/vm/
 data/alertmanager/
 data/backup/
+
+# Morning notes for the owner: contain passwords. Never commit.
+MORNING.md

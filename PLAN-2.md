@@ -35,7 +35,7 @@ names stable where you can and say exactly what changed in your final report.
 | alertmanager | host | `127.0.0.1:9093` (cluster disabled) | 48m |
 | node-exporter | host | `127.0.0.1:9101` | 32m |
 | backup | bridge `platform_internal` | none | 256m |
-| docker-proxy-backup | none (unix socket in `./run/backup-proxy/`) | - | 24m |
+| docker-proxy-backup | none (unix socket in the named volume `platform_backup-proxy-sock`; was `./run/backup-proxy/` until the security fixes, f525cbd) | - | 24m |
 
 Actual combined usage of new containers must stay < 350 MB (`docker stats`).
 **No Grafana**: it idles at 100-150 MB, which leaves no headroom for restic runs inside 350 MB.

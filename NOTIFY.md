@@ -297,7 +297,7 @@ func main() {
 
 ## Reading notifications
 
-- **iPhone**: the ntfy app, see the README section "iPhone ntfy app setup".
+- **iPhone**: the ntfy app, see the README section [iPhone ntfy app setup](README.md#iphone-ntfy-app-setup).
 - **Dashboard**: the Notifications panel on http://exp.lab shows the last 20
   messages across all six topics (Portal polls ntfy every 15 s with the
   read-only `NTFY_TOKEN_PORTAL`, and immediately after each `/api/notify`).

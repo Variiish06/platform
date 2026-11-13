@@ -41,11 +41,11 @@ After a correct password, the server must remember that this browser is logged i
 
 **Session cookie (used here).** The cookie holds a random ID that means nothing by itself. The server keeps a table of valid IDs and looks the ID up on every request.
 
-- Created at `portal/internal/auth/session.go:60`: 32 random bytes.
-- Looked up at `session.go:81`.
-- Logout deletes the row (`session.go:118`), and the cookie is worthless from that moment.
+- Created at `portal/internal/auth/session.go:68` (`CreateWithTTL`): 32 random bytes (`session.go:72`).
+- Looked up at `session.go:92` (`Validate`; the query is at `session.go:99`).
+- Logout deletes the row (`session.go:134`), and the cookie is worthless from that moment.
 - The table stores a SHA-256 hash of the ID, not the ID (`session.go:54`, schema at `portal/internal/store/store.go:24`). A stolen database or backup contains no usable cookies.
-- Sliding expiry: each use pushes the deadline 30 days out (`session.go:107`), at most once every 5 minutes to avoid a database write per request (`session.go:21`).
+- Sliding expiry: each use pushes the deadline 30 days out (`session.go:123`), at most once every 5 minutes to avoid a database write per request (`session.go:21`).
 
 **JWT.** The cookie holds signed data, such as "user kunchu01, valid until Friday". The server checks the signature and needs no table. That suits many servers that share no database. The cost is that a JWT cannot be cancelled before it expires, unless you add a blocklist, which is a session table again.
 
@@ -62,25 +62,25 @@ A fast hash (SHA-256) is the wrong tool, because an attacker who steals the data
 - The result stores the parameters and salt next to the hash, so they can be raised later without breaking old hashes.
 - Verifying: `password.go:66`, ending in a constant-time comparison (`password.go:98`) whose duration does not reveal how many bytes matched.
 - Only one hash runs at a time (`password.go:40`), so ten simultaneous logins cannot use 190 MiB.
-- The CLI that sets the password: `portal/cmd/portal/main.go:152`.
+- The CLI that sets the password: `portal/cmd/portal/main.go:167`.
 
 ## 5. Cookie domain scoping
 
 A cookie normally belongs to the exact host that set it. A cookie set by `exp.lab` would not be sent to `focal.exp.lab`, and single sign-on would not work.
 
-Setting `Domain=exp.lab` on the cookie tells the browser to send it to `exp.lab` and every subdomain (`portal/internal/server/server.go:229`). That one attribute is what makes one login cover all apps.
+Setting `Domain=exp.lab` on the cookie tells the browser to send it to `exp.lab` and every subdomain (`portal/internal/server/server.go:280`). That one attribute is what makes one login cover all apps.
 
 Browsers refuse this for "public suffixes" such as `com` or `co.uk`. Otherwise one site could set cookies for every `.com` site. The Public Suffix List is the browsers' list of those. `exp.lab` is not on it (see DECISIONS.md), so the cookie is accepted.
 
 The other attributes:
 
-- `HttpOnly` (`server.go:233`): JavaScript cannot read the cookie, so a script-injection bug cannot steal it.
-- `SameSite=Lax` (`server.go:236`): the cookie is sent when you click a link to an app, but not on requests that other websites fire in the background.
+- `HttpOnly` (`server.go:284`): JavaScript cannot read the cookie, so a script-injection bug cannot steal it.
+- `SameSite=Lax` (`server.go:287`): the cookie is sent when you click a link to an app, but not on requests that other websites fire in the background.
 - `Secure`: only sent over HTTPS. Off until HTTPS is added (`COOKIE_SECURE` in `.env`).
 
 Sharing a cookie with every subdomain has a cost: every app would receive the Portal session cookie. A buggy app could leak it. So Caddy removes it from the request before proxying (`caddy/Caddyfile:52`). Apps get their own cookies and never Portal's.
 
-`SameSite` treats `focal.exp.lab` and `exp.lab` as the same site, so it does not stop one app from posting to the dashboard. For that, every state-changing request must carry an `Origin` header equal to `http://exp.lab` (`server.go:254`).
+`SameSite` treats `focal.exp.lab` and `exp.lab` as the same site, so it does not stop one app from posting to the dashboard. For that, every state-changing request must carry an `Origin` header equal to `http://exp.lab` (`server.go:306`).
 
 ## 6. SSE vs WebSockets
 
@@ -88,14 +88,14 @@ The dashboard updates without reloading. The server needs a way to push data to 
 
 **Server-Sent Events (used here).** The browser makes a normal GET request, and the server keeps the response open and writes a few lines of text whenever something changes. One direction only: server to browser.
 
-- The handler: `portal/internal/server/dashboard.go:251`. The content type is set at `dashboard.go:259`.
-- The wire format is plain text: `event:`, `data:`, blank line (`portal/internal/server/hub.go:30`).
-- The hub copies each update to every open dashboard (`hub.go:47`) and gives a new one the latest state at once (`hub.go:68`).
-- A comment line every 20 seconds keeps idle connections alive (`dashboard.go:306`).
-- In the browser, `EventSource` does the parsing and reconnects by itself (`portal/internal/server/web/static/app.js:65`). Phones kill background connections, so the page reconnects when it becomes visible (`app.js:88`).
-- App tiles and the container list arrive as ready-made HTML (`app.js:81`). System numbers arrive as JSON and are patched in place so the bars animate (`app.js:83`).
+- The handler: `portal/internal/server/dashboard.go:266`. The content type is set at `dashboard.go:274`.
+- The wire format is plain text: `event:`, `data:`, blank line (`portal/internal/server/hub.go:37`).
+- The hub copies each update to every open dashboard (`hub.go:65`) and gives a new one the latest state at once (`hub.go:82`).
+- A comment line every 20 seconds keeps idle connections alive (`dashboard.go:301`, written at `dashboard.go:321`).
+- In the browser, `EventSource` does the parsing and reconnects by itself (`portal/internal/server/web/static/app.js:82`). Phones kill background connections, so the page reconnects when it becomes visible (`app.js:107`).
+- App tiles and the container list arrive as ready-made HTML (`app.js:98`). System numbers arrive as JSON and are patched in place so the bars animate (`app.js:100`).
 
-**WebSockets** are a separate protocol with messages in both directions. They suit chat or games. A dashboard only listens, and the one action it has (restart) is an ordinary POST (`dashboard.go:313`). SSE is less code, works through any HTTP proxy and reconnects for free.
+**WebSockets** are a separate protocol with messages in both directions. They suit chat or games. A dashboard only listens, and the one action it has (restart) is an ordinary POST (`dashboard.go:328`). SSE is less code, works through any HTTP proxy and reconnects for free.
 
 ## 7. Rate limiting
 
@@ -104,15 +104,250 @@ Without a limit, a script could try thousands of passwords a minute. With **expo
 - The limiter: `portal/internal/auth/ratelimit.go`. `Allow` at line 47, `Fail` at line 67, the doubling at line 85, reset on success at line 95.
 - It is checked before the password is looked at (`portal/internal/server/auth_handlers.go:115`). A locked-out client cannot test a guess at all, even the right one.
 - A failure is recorded at `auth_handlers.go:157`.
-- Clients are told apart by IP address (`portal/internal/server/server.go:262`). Caddy supplies the real address in `X-Forwarded-For`.
+- Clients are told apart by IP address (`portal/internal/server/server.go:313`). Caddy supplies the real address in `X-Forwarded-For`.
 
 ## 8. Smaller ideas worth knowing
 
-- **Least privilege for Docker.** Access to the Docker socket is root on the host. Portal never gets it. A separate proxy forwards only "list", "stats" and "restart" (`docker-compose.yml:86-87`) and has no network at all (`docker-compose.yml:88`). Portal's client: `portal/internal/docker/docker.go:54` (HTTP over a unix socket), `docker.go:86` (list), `docker.go:160` (restart).
+- **Least privilege for Docker.** Access to the Docker socket is root on the host. Portal never gets it. A separate proxy forwards only "list", "stats" and "restart" (`docker-compose.yml:116-117`) and has no network at all (`docker-compose.yml:118`). Its socket is in `run/portal/`, the only part of `run/` Portal mounts (`docker-compose.yml:82`). Portal's client: `portal/internal/docker/docker.go:58` (HTTP over a unix socket), `docker.go:97` (list), `docker.go:136` (restart).
 - **Reading the machine.** CPU, memory, battery and WiFi come from kernel pseudo-files, with no tools run: `portal/internal/sysinfo/sysinfo.go:83` (CPU from `/proc/stat`), `:125` (memory), `:167` (temperature), `:206` (WiFi), `:232` (battery from `/sys/class/power_supply`).
 - **Health checks.** Every 30 seconds each app is requested directly (`portal/internal/apps/apps.go:218`). Any answer below HTTP 500 counts as up.
 - **Config hot reload.** `apps.yaml` is re-read when its modification time changes. A broken edit keeps the previous version (`apps.go:141`).
-- **Content-Security-Policy.** A response header that tells the browser to run scripts only from this site (`portal/internal/server/server.go:183`).
+- **Content-Security-Policy.** A response header that tells the browser to run scripts only from this site (`portal/internal/server/server.go:234`).
 - **SQLite in WAL mode.** Lets the CLI write while the server reads (`portal/internal/store/store.go:40`).
-- **Metrics.** `/metrics` is plain text in Prometheus format, written by hand (`portal/internal/server/metrics.go:55`).
+- **Metrics.** `/metrics` is plain text in Prometheus format, written by hand (`portal/internal/server/metrics.go:120`; more in section 10).
 - **Tests.** `portal/internal/auth/*_test.go` cover hashing, session expiry, redirect validation, the rate limiter and TOTP. They run on every image build (`portal/Dockerfile`), so a failing test stops a deploy.
+
+---
+
+Sections 9 to 19 cover phase 2 (12–13 Nov 2026): notifications, monitoring and backups. Line numbers were checked against the code on 13 Nov 2026.
+
+## 9. Pub/sub and push notifications
+
+**Publish/subscribe** ("pub/sub") separates whoever sends a message from whoever reads it. A **publisher** sends a message to a **topic**, which is just a name such as `backups`. A **subscriber** asks for the messages of one or more topics. Neither knows the other exists; the topic name is the only thing they share. So adding a sender (a new app) or a reader (a second phone) changes nothing for the others.
+
+In ntfy, publishing is one HTTP request: `POST http://ntfy.exp.lab/backups` with the text as the body (`ntfy/server.yml:4`). Who may do what is decided per user and topic:
+
+- Anonymous users may do nothing (`ntfy/server.yml:61`, `deny-all`).
+- Each service user may write exactly one topic and read none; Portal's user may read all six and write none (`compose.notify.yml:66`, for example `svc-alerts:system:wo` at `compose.notify.yml:69`).
+- The six topics are named once in Go (`portal/internal/notify/notify.go:34`).
+
+**Three ways to receive.** A subscriber can:
+
+1. **Poll**: ask "anything new since X?" now and then and get an answer that ends. Portal does this every 15 seconds (`portal/internal/server/dashboard.go:483`) with one request for all six topics, `GET /system,backups,.../json?poll=1&since=<last id>` (`portal/internal/notify/notify.go:151`). Simple and robust, but up to 15 seconds late, and every poll costs a request even when nothing happened.
+2. **Stream**: open one request that never ends, and the server writes each message down it as it happens. Instant and cheap while idle, but the connection must stay open (NOTIFY.md shows `curl -sN .../system/json`).
+3. **Push**: a third party wakes the device when there is something to fetch. Phones need this, because iOS kills background connections to save battery. Only Apple's push service (**APNs**) may wake an app, and only the holder of an app's APNs key may send to it. For the ntfy app, that is the public `ntfy.sh` server.
+
+**How the iPhone gets woken without seeing the content.** With `upstream-base-url: https://ntfy.sh` (`ntfy/server.yml:103`, explained at `ntfy/server.yml:90`), for each new message our server sends ntfy.sh a "poll request" containing only the message ID. The topic it uses there is the SHA-256 hash of our topic URL, not the name. ntfy.sh passes it through APNs, the app wakes, and the app fetches the real message from `http://ntfy.exp.lab` over Tailscale with your login. ntfy.sh learns that some message exists for some hashed topic at some time. Nothing else.
+
+Two more pub/sub details in this stack:
+
+- **Senders that cannot speak ntfy.** Alertmanager can only POST its own JSON. ntfy can apply a template to that JSON when the URL says `?template=alert-urgent` (`monitoring/alertmanager.yml:54`). The template sets title, text and priority: 5 while firing, 3 when resolved (`ntfy/templates/alert-urgent.yml:40`).
+- **The cache.** ntfy keeps messages for 7 days (`ntfy/server.yml:49`). A phone that was offline asks "since my last message" and catches up. That is why polling with `since=` works.
+
+**Portal's SSE hub is a small pub/sub of its own** (section 6). Background loops publish named events (`apps`, `containers`, `notify`, `backup`); each open dashboard tab is a subscriber.
+
+- `Publish` sends to every subscriber, skipping a message identical to the last one for that event (`portal/internal/server/hub.go:57`).
+- It never waits for a slow subscriber: if a tab's buffer is full, that tab misses this update and gets the next full state instead (`portal/internal/server/hub.go:70`).
+- `Subscribe` hands a new tab the latest message of every event at once (`portal/internal/server/hub.go:78`), like ntfy's cache.
+- Notification text comes from outside, so before it is framed as an event every `\r` is turned into `\n`. Otherwise a message could start a line of its own that the browser reads as a separate SSE field and forge an event (`portal/internal/server/hub.go:40`, inside `formatEvent` at `hub.go:37`). This was a security-review fix (section 17 has another one).
+- The Notifications panel is published to this hub after each ntfy poll (`portal/internal/server/notify.go:110`) and right after a successful `/api/notify` (`portal/internal/server/notify.go:190`).
+
+## 10. Pull-based metrics and time-series databases
+
+A **metric** is a number with a name, for example "RAM available". A **time series** is that number recorded again and again: a list of (time, value) pairs. A **time-series database** (TSDB) is built to store millions of such pairs cheaply and answer questions like "average over the last hour".
+
+**Pull, not push.** Programs here do not send their numbers anywhere. Each one serves a plain-text page, `/metrics`, with its current values. VictoriaMetrics fetches ("scrapes") every page every 30 seconds (`monitoring/scrape.yml:34`) and stores each line with the time it read it. The comment at `portal/internal/server/metrics.go:16` explains the upside: when a program dies, the scrape fails and the scraper records `up = 0`. A push-based program that dies just goes quiet, and silence looks the same as "nothing to report".
+
+**The exposition format.** Portal writes the page by hand (`portal/internal/server/metrics.go:120`):
+
+```
+# HELP portal_app_up Whether the app's last health check succeeded.
+# TYPE portal_app_up gauge
+portal_app_up{app="focal"} 1
+```
+
+- `HELP` and `TYPE` are comments for humans and tools. A **gauge** is a reading that goes up and down (temperature, "is it up"). A **counter** only goes up (requests served since start) and is meaningful only as a rate (`metrics.go:32`).
+- `{app="focal"}` is a **label**. The name plus the full set of labels identifies one series: `portal_app_up{app="focal"}` and `portal_app_up{app="git"}` are two series.
+- Label values must escape `\`, `"` and newline (`metrics.go:54`).
+- A counter that only appears after its first increment makes `rate()` miss that first event, so Portal prints every combination from the start, zeros included (`metrics.go:157`).
+- `portal_container_up` is printed for **every** container, stopped ones as `0` (`portal/internal/server/containers.go:143`, the line itself at `containers.go:150`). "A container stopped" is then a value changing from 1 to 0, which a rule can see. If stopped containers were left out, the series would just stop, and missing data is much harder to alert on.
+
+**Scrape config.** `monitoring/scrape.yml` lists **jobs** (`node` at `scrape.yml:41`, `portal` at `scrape.yml:48`), each with **targets** (addresses). Every series gets `job` and `instance` labels, and the scraper adds an `up` series per target.
+
+**Cardinality** is the number of distinct series. Each one costs memory and disk, so labels must have few possible values (`monitoring/scrape.yml:28`). Never use a user ID, a URL or a timestamp as a label. Two choices here keep it small:
+
+- node_exporter starts with every collector off and switches on only the ones used (`compose.monitoring.yml:61`).
+- Docker's virtual network interfaces (`veth…`) are excluded (`compose.monitoring.yml:78`). They change with every container restart and would create new series each time.
+
+Result on 13 Nov: about 3,500 series in total, 24 of them `portal_container_up`, and 5.7 MB on disk after the first 8 hours.
+
+**Instant and range queries.** PromQL is the query language. Portal's client (`portal/internal/metricsdb/metricsdb.go`) has two calls:
+
+- `Query` (`metricsdb.go:119`): evaluate an expression at one moment, giving one value per series. Example: "uptime so far today".
+- `QueryRange` (`metricsdb.go:131`): evaluate the same expression at start, start+step, start+2·step… That is one line on a chart. The **step** sets the chart's resolution, not the scrape interval. `/graphs` picks the step so every range draws about 360 points (`portal/internal/server/graphs.go:37`): 10 s for 1 hour, 2 h for 30 days.
+
+**`rate()`.** A counter like `node_cpu_seconds_total` only grows. `rate(x[5m])` takes the samples of the last 5 minutes and returns the increase per second. CPU busy % is then `100 - idle rate × 100` (`graphs.go:72`). The window must be at least as long as the step, otherwise a 2-hour step with a 5-minute window looks at only 5 minutes of every 120 (`graphs.go:52`, `rateWindow` at `graphs.go:213`).
+
+**Retention.** Old data is deleted automatically after 30 days (`compose.monitoring.yml:107`). The uptime bars therefore show 30 days.
+
+**Why VictoriaMetrics and not Prometheus.** Both speak the same scrape format and PromQL. Prometheus is the reference implementation, but it keeps the last hours of samples in memory and usually needs noticeably more RAM than VictoriaMetrics for the same data. On an 8 GB laptop with a 350 MiB budget for everything new, VictoriaMetrics fits: the scraper, storage and query UI are one process, its cache budget can be capped (`compose.monitoring.yml:113`, with `GOMEMLIMIT` at `compose.monitoring.yml:125`), and it compresses samples to well under a byte each. It runs at about 90–115 MiB here.
+
+## 11. Alert timing: `for:`, grouping, repeats and flapping
+
+An alert rule is a query that should normally return nothing. vmalert runs every rule every 30 seconds (`compose.monitoring.yml:169`). Each series the query returns is one alert, identified by its labels (`monitoring/alerts/services.yml:6`):
+
+- **pending**: returned for the first time. Nothing is sent (`services.yml:10`).
+- **firing**: still returned after the rule's `for:` time (`services.yml:48` for ContainerDown: 2 minutes). Sent to Alertmanager.
+- **resolved**: no longer returned. Alertmanager sends a "Resolved" message (`send_resolved` at `monitoring/alertmanager.yml:55`).
+
+`for:` filters blips: a container that restarts in 10 seconds, or one failed scrape, never reaches the phone. vmalert stores its timers in VictoriaMetrics (`compose.monitoring.yml:175`), so restarting vmalert does not reset a timer that was 90 seconds in.
+
+**Alertmanager turns a stream into a few messages.** vmalert re-sends every firing alert every 30 seconds. Alertmanager decides when you hear about it:
+
+- `group_by: [alertname]` (`monitoring/alertmanager.yml:22`): all ContainerDown alerts share one message, so five containers dying in a reboot is one buzz.
+- `group_wait: 30s` (`alertmanager.yml:27`): after the first alert of a new group, wait 30 s for others to join.
+- `group_interval: 5m` (`alertmanager.yml:31`): after a message for a group, wait at least 5 minutes before the next one for that group, whether an alert joined or resolved.
+- `repeat_interval: 4h` (`alertmanager.yml:35`): if nothing changed but it is still firing, remind every 4 hours.
+
+**Worked example: the test run on 12 Nov (times UTC; ≈ marks times worked out from the intervals, the others were observed).**
+
+| Time | What happened | Why then |
+|---|---|---|
+| 20:04:03 | A dummy container is stopped | |
+| ≈20:04:30 | `portal_container_up{name="dummy"}` becomes 0 in VictoriaMetrics; the rule returns it: **pending** | Portal reads Docker every 10–30 s, VictoriaMetrics scrapes every 30 s, vmalert evaluates every 30 s |
+| ≈20:06:55 | Still down after 2 minutes: **firing** | `for: 2m` |
+| 20:07:25 | One notification, priority 5 | `group_wait: 30s` |
+| 20:07:34 | The container is started again; at the next evaluations the alert is **resolved** | |
+| 20:12:25 | One "Resolved" notification, priority 3 | exactly 5 minutes after the firing message: `group_interval: 5m` |
+
+The resolve took 5 minutes because, for Alertmanager, a resolve is an update to a group, and a group gets at most one update per `group_interval`. A shorter interval would mean faster "Resolved" messages but also more messages when something flaps.
+
+**Flapping** is a value hovering around the threshold (disk at 84.9 %, 85.1 %, 84.9 %…), which would fire, resolve, fire… (`monitoring/alerts/host.yml:5`). Three guards:
+
+1. `for:` stops the "fire" side.
+2. `keep_firing_for: 15m` on DiskFull (`host.yml:47`) stops the "resolve" side: once firing, the alert stays firing until the value has been below the line for 15 minutes.
+3. `group_interval` caps it at one message per 5 minutes in any case.
+
+**Only things that were recently up.** ContainerDown also requires that the container was up at some point in the last 24 hours, `max_over_time(portal_container_up[24h]) == 1` (`services.yml:47`). Containers that have been stopped for weeks (the bots) never alert. The side effect: a container that stays down for more than a day resolves by itself.
+
+## 12. Dead man's switch
+
+A train's dead man's switch stops the train when the driver *stops* pressing it. Monitoring has the same problem: a job that fails can send "I failed", but a job that never runs (container gone, cron broken, machine off) sends nothing, and nothing looks exactly like "all good".
+
+So the backup proves it is alive instead, and the alert fires when the proof is too old or missing (`monitoring/alerts/backup.yml:3`):
+
+- After every successful backup, `last_success` is set to the finish time (`backup/scripts/backup.sh:210`).
+- `write_metrics` turns that into `backup_last_success_timestamp_seconds` (`backup/scripts/lib.sh:334`, the metric at `lib.sh:341`) in `run/textfile/backup.prom`. node_exporter's textfile collector serves it and VictoriaMetrics scrapes it like any other metric.
+- BackupStale (`monitoring/alerts/backup.yml:24`) fires when `time() - backup_last_success_timestamp_seconds > 26 * 3600` (`backup.yml:26`): the daily run plus 2 hours of slack.
+- `or on() absent(backup_last_success_timestamp_seconds)` (`backup.yml:28`) covers the metric not existing at all. `absent()` returns a series exactly when there is none. Without this half, a deleted file or a broken collector would make the first half return nothing, and the alert would stay silent.
+- **Staleness**: when a scrape no longer contains a series, the database marks it stale and queries stop returning it (at the latest after the few-minute lookback window). So "the file disappeared" becomes "absent" within minutes, and `for: 10m` (`backup.yml:29`) then fires.
+
+This is also why a successful backup sends no message (`backup/scripts/backup.sh:214`): a daily "OK" trains you to ignore the topic. Silence is normal; the switch catches silence that lasts too long.
+
+## 13. 3-2-1 backups
+
+The rule of thumb: **3** copies of your data, on **2** different kinds of storage, **1** of them off-site.
+
+A **copy** is something you can restore from when the original is gone. That rules out:
+
+- **RAID or a second partition on the same disk**: one hardware failure, theft or fire takes both.
+- **A sync folder**: it faithfully copies a deletion or a corruption too.
+- **A backup you cannot decrypt**: without `RESTIC_PASSWORD` the repository is random bytes.
+
+Here:
+
+1. The live data (copy 1).
+2. The local restic repository `/var/backups/restic-local` (`compose.backup.yml:99`, chosen at `backup/scripts/lib.sh:148`). It has history and protects against mistakes: a deleted file, a broken upgrade, a corrupt database. It is on **the same disk**, so against a dead disk, theft or fire it counts for nothing.
+3. Google Drive (`lib.sh:151`): another company's storage in another place. That is the off-site copy, and it starts once you connect it (RESTORE.md section 8).
+
+`select_repo` (`lib.sh:143`) uses one target at a time. Today that is the local repository; after the switch it is Drive. Once you have switched, you have live data plus Drive, plus the frozen local repository holding history up to the switch.
+
+## 14. Incremental and deduplicated backups
+
+A naive backup copies everything every night: 30 nights of a 30 MB data set is 900 MB. restic stores each piece of data once.
+
+**Content-defined chunking.** restic cuts every file into chunks of about 0.5–8 MB. It does not cut at fixed offsets: it slides a small window over the bytes and cuts wherever a rolling hash of the window matches a pattern. The cut points depend on the content, so inserting a line near the start of a file moves only the nearby cut and the later chunks stay identical. Each chunk is named by its SHA-256 hash and stored once; a chunk that already exists costs nothing.
+
+**Snapshots are trees.** A snapshot is a small object pointing to a tree of directories. Each file entry lists its chunk hashes. Two snapshots of an unchanged file point to the same chunks. Every snapshot is a complete picture you can restore on its own; there is no chain of "full + incrementals". Deleting a snapshot (`forget`) removes the pointers, and `prune` deletes chunks nothing points to any more (`backup/scripts/backup.sh:197`: keep 7 daily, 4 weekly, 6 monthly).
+
+**Why the Postgres dumps are plain, uncompressed SQL** (`backup/scripts/backup.sh:86`). Change one row and a plain dump changes in a few lines, so most chunks stay identical. A gzip-compressed dump changes almost completely after the first difference, because compression carries state forward through the file. restic would store it in full every night. restic compresses its chunks itself, so nothing is lost by dumping plain.
+
+**Measured on 12–13 Nov:**
+
+- First backup: 29.4 MB scanned, 5.2 MB stored (compression plus dedup inside the first run).
+- Second backup: 1.69 MB stored. Only the changed chunks were new.
+- A later run: 29.5 MB scanned, 2.46 MB stored. Ritual's WAL had grown, and the SQLite copies change a little each time.
+- The repository was 9.8 MB for two snapshots.
+
+The summary line comes from `backup/scripts/backup.sh:189`.
+
+**Checking without reading everything.** `restic check` verifies the structure: every snapshot points to trees and chunks that exist. `--read-data-subset=n/10` also downloads and verifies one tenth of the data, rotating with the week number (`backup/scripts/check.sh:23`, `check.sh:26`). Everything is read every 10 weeks, and a weekly check on Drive stays cheap.
+
+## 15. Why a live SQLite file cannot simply be copied
+
+A SQLite database is a file of fixed-size **pages** (4 KB). A write changes several pages, and the file is only consistent between transactions.
+
+- **A torn copy.** `cp` reads the file from start to end while the app keeps writing. The copy can contain page 10 from before a transaction and page 900 from after it. That file may fail to open, or open and return wrong data.
+- **Journal modes.** In the default *rollback journal* mode, SQLite saves the old pages to `app.db-journal` before overwriting them in `app.db`. In **WAL** (write-ahead log) mode, new pages are appended to `app.db-wal` instead, and `app.db` itself is only updated at a **checkpoint**, when the WAL is copied back. Until then, the newest data exists **only in the -wal file**.
+- **Concrete example.** When the backups were built, Ritual's `ritual.db` was 61 KB and `ritual.db-wal` 2.6 MB (3.4 MB on 13 Nov). Copying only `ritual.db` would lose most of what you entered recently. Copying both files at slightly different moments gives a pair that does not match.
+
+**What `.backup` does.** `sqlite3 app.db ".backup copy.db"` uses SQLite's online backup API. It reads the database through SQLite under a read lock, which includes the WAL content, and writes a single self-contained file. The app can keep reading and writing meanwhile. In this stack:
+
+- The copy is made at `backup/scripts/backup.sh:50`, with `.timeout 10000` so it waits up to 10 s if the app holds a write lock.
+- It is then checked with `PRAGMA integrity_check` (`backup.sh:53`). Only `ok` passes.
+- The raw `*.db`, `-wal` and `-shm` files are excluded from restic's file walk; only these copies are stored.
+
+**Why as the database owner.** Even a reader of a WAL database writes to it: it must update the shared-memory index `app.db-shm`, and opening may create `-wal`/`-shm`. If root did that, a root-owned `-shm` would appear next to Ritual's database, and Ritual (uid 1000) could no longer open its own database. So the script reads the owner of each file (`backup.sh:45`) and runs sqlite3 as that uid/gid with `setpriv` (`backup/scripts/lib.sh:99`). This needs the `SETUID`/`SETGID` capabilities (`compose.backup.yml:36`) and read-write mounts on the directories with live databases (`compose.backup.yml:79`). Both are listed as accepted risks in DECISIONS.md.
+
+## 16. Restore tests
+
+"A backup you have not restored is a hope" (`backup/scripts/restore-test.sh:6`). Some problems only appear when you restore:
+
+- a wrong or lost password
+- a repository with missing pieces
+- a database copied mid-write
+- a dump cut off halfway
+- a folder you assumed was included but an exclude rule skipped
+
+So the restore is tested for real:
+
+- **Monthly** (`backup/crontab:16`, the 1st at 04:30 IST): `restore-test.sh` unpacks the newest snapshot into a scratch directory (`restore-test.sh:47`). It runs `PRAGMA integrity_check` on every SQLite file it finds by content, not by name (`check_sqlite_tree`, `backup/scripts/lib.sh:119`; called at `restore-test.sh:50`), and fails if any check fails (`restore-test.sh:52`). It also checks that every expected database is present and that both Postgres dumps end with pg_dump's "dump complete" marker. Then it deletes the scratch copy.
+- **Weekly**: `restic check` (section 14).
+- **On demand**: "Restore to staging" on the dashboard does the same into `~/restore-staging/` (`backup/scripts/restore-staging.sh:55`), where you can look at it.
+
+On 12–13 Nov, a staging restore and a restore test passed: 9 of 9 SQLite files `ok`, both dumps complete. A deliberately broken run produced the urgent "FAILED" message, so the failure path is tested too.
+
+## 17. Trust boundaries: the status.json bug
+
+A **trust boundary** is where data crosses from a less trusted place into a more trusted one. Code on the trusted side must treat that data as hostile, however it got there.
+
+`data/backup/status.json` is written by the backup container (root), but it lives in a directory that uid 1000, and therefore Portal, can write. The weekly summary script read `last_success` from it and used it in bash arithmetic, `$((now - last_success))`. Bash evaluates array subscripts inside arithmetic, so a value like `a[$(command)]` **runs the command**, here as root in the backup container. Anyone who could write that file as uid 1000 could have become root in a container that can reach the Docker socket proxy.
+
+The fix (commit f525cbd) treats the file as untrusted input at every read:
+
+- `backup/scripts/lib.sh:251` explains the threat. `JQ_SANITIZE` (`lib.sh:261`) rebuilds the object from the schema: numbers must be non-negative integers or become `null`, strings are length-capped, snapshot IDs must be hex, unknown keys are dropped. `status_read` applies it (`lib.sh:291`).
+- `is_uint` (`lib.sh:302`) accepts only plain digits, no sign and no leading zero (bash reads `010` as octal). `status_num` (`lib.sh:307`) returns a number or nothing.
+- `weekly-summary.sh` reads `last_success` only through `status_num` (`backup/scripts/weekly-summary.sh:20`). The arithmetic still checks `is_uint` and forces base 10 (`weekly-summary.sh:37`). Two independent checks: defence in depth.
+
+The lesson: a file is an input, like an HTTP request. Where it is stored decides who could have written it.
+
+## 18. Atomic file writes
+
+Several files here are written by one process and read by another at any moment. If the writer is halfway through, the reader sees half a file: invalid JSON, a truncated metrics file, a request with a missing field.
+
+The fix is always the same. Write to a temporary file **in the same directory**, then `rename()` it over the real name. On Linux, a rename within one filesystem is **atomic**: a reader sees either the whole old file or the whole new one, never a mix.
+
+- status.json and backup.prom: `write_file_as_owner` (`backup/scripts/lib.sh:230`), which writes and then does `mv -f` (`lib.sh:234`).
+- Portal's backup requests: `WriteRequest` (`portal/internal/backup/backup.go:288`) creates a temp file (`portal/internal/backup/backup.go:296`) and renames it into place (`portal/internal/backup/backup.go:326`). The watcher only picks up `*.json` names, so it never sees the temp file.
+- The Alertmanager token file: `scripts/monitoring-secrets.sh:36` (`mktemp`) and `:45` (`mv`).
+
+The same directory matters because a rename across filesystems is a copy plus a delete, which is not atomic.
+
+## 19. Least privilege in the two socket proxies
+
+Access to `/var/run/docker.sock` is root on the host: whoever can talk to it can start a privileged container that mounts `/`. So nothing here talks to it directly. Two separate proxies each allow a different, minimal set of calls (section 8 has the first one):
+
+- **Portal's proxy** allows `GET` container list and stats, and `POST` restart (`docker-compose.yml:116-117`). No network at all (`docker-compose.yml:118`). Its socket is in `run/portal/`, and that is the only part of `run/` Portal mounts (`docker-compose.yml:82`).
+- **The backup proxy** allows only what `docker exec … pg_dump` needs in the two Postgres containers: inspect them, create an exec, start it, read its exit code, ping (`compose.backup.yml:168`, `compose.backup.yml:170`). Its socket is mode 600 and owned by root (`compose.backup.yml:159`), in a named Docker volume that only these two containers mount (`compose.backup.yml:112`, `compose.backup.yml:182`). Not even uid 1000 on the host can reach it.
+
+**The limit, stated in the file** (`compose.backup.yml:129`): the proxy filters only the method and path of a request, never its body. The body of an exec-create request chooses the command and can ask for `"Privileged": true`. So whoever controls the backup container can run anything as root in those two Postgres containers, and from there reach the host. Least privilege made the door narrow. It is still a door. The rest of the defence is around it: no listening ports, three capabilities, strict validation of Portal's request files (`backup/scripts/watcher.sh:67`), sanitised status (section 17), and children started with an empty environment (`backup/scripts/lib.sh:103`), so sqlite3 or tar never inherit the restic password or ntfy token.
