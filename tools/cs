@@ -1,0 +1,747 @@
+#!/usr/bin/env bash
+# =============================================================================
+# cs — a small manager for Claude Code sessions that live inside tmux.
+#
+#   cs                      list projects and every tmux session running claude
+#   cs start dalal ritual   (re)open those projects' conversations in tmux
+#   cs stop --idle 12h      close claude processes nobody has touched for 12h
+#   cs help                 everything else
+#
+# The idea in one paragraph: each project gets ONE tmux session with the same
+# name as the project. Inside it sits an ordinary bash shell; `cs start` types
+# `claude --continue` into that shell, `cs stop` sends claude a polite SIGTERM.
+# Claude Code saves every conversation to ~/.claude/projects/<encoded-dir>/,
+# so stopping is cheap (RAM back) and starting again resumes where you were.
+#
+# Written in plain bash on purpose (no Go/Node needed). Read top to bottom:
+#   1. settings            4. the "rows" model (what `cs ls` shows)
+#   2. small helpers       5. commands (ls, ram, start, stop, ...)
+#   3. config + processes  6. argument parsing / main
+# See ~/platform/SESSIONS.md for the user guide.
+# =============================================================================
+
+# -e: exit on any failing command; -u: using an unset variable is an error;
+# -o pipefail: a pipeline fails if ANY part fails (not only the last one).
+set -euo pipefail
+
+# --- 1. settings (all overridable from the environment) ----------------------
+# ${VAR:-default} means "use $VAR if set and non-empty, else default".
+CS_CONFIG=${CS_CONFIG:-$HOME/.config/cs/projects.conf}
+CS_CLAUDE_PROJECTS=${CS_CLAUDE_PROJECTS:-$HOME/.claude/projects}
+CS_MIN_FREE_MB=${CS_MIN_FREE_MB:-1024}        # warn below this much MemAvailable
+CS_STOP_TIMEOUT=${CS_STOP_TIMEOUT:-10}        # seconds to wait after SIGTERM
+CS_TMUX_SOCKET=${CS_TMUX_SOCKET:-}            # like `tmux -L NAME` (tests use this)
+CS_TMUX_CONF=${CS_TMUX_CONF:-}                # like `tmux -f FILE` (tests: /dev/null)
+if [[ -z ${CS_CLAUDE_BIN:-} ]]; then
+  if [[ -x $HOME/.local/bin/claude ]]; then CS_CLAUDE_BIN=$HOME/.local/bin/claude
+  else CS_CLAUDE_BIN=claude; fi
+fi
+
+# The real location of this script (follows the ~/.local/bin/cs symlink).
+SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
+
+# Project names double as tmux session names, so keep them boring.
+NAME_RE='^[a-z0-9][a-z0-9_-]*$'
+SHELLS=" bash zsh sh dash fish ksh "           # "pane is sitting at a prompt"
+
+# --- 2. small helpers ---------------------------------------------------------
+die()  { printf 'cs: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'cs: %s\n' "$*" >&2; }
+
+# tm: run tmux against the right server. Arrays keep every argument intact,
+# even ones with spaces — never build a command as one big string.
+tm() {
+  local -a base=(tmux)
+  [[ -n $CS_TMUX_CONF ]] && base+=(-f "$CS_TMUX_CONF")
+  [[ -n $CS_TMUX_SOCKET ]] && base+=(-L "$CS_TMUX_SOCKET")
+  "${base[@]}" "$@"
+}
+
+# The socket file our tmux commands talk to; used to decide whether $TMUX
+# (the server *we are sitting in*) is the same server cs is looking at.
+our_socket_path() {
+  local dir=${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)
+  if [[ -n $CS_TMUX_SOCKET ]]; then printf '%s/%s' "$dir" "$CS_TMUX_SOCKET"
+  elif [[ -n ${TMUX:-} ]]; then printf '%s' "${TMUX%%,*}"  # plain `tmux` uses $TMUX
+  else printf '%s/default' "$dir"; fi
+}
+
+# Strip leading/trailing whitespace without spawning anything.
+trim() {
+  local s=$1
+  s=${s#"${s%%[![:space:]]*}"}
+  s=${s%"${s##*[![:space:]]}"}
+  printf '%s' "$s"
+}
+
+# 75 -> "1m", 7200 -> "2h", 200000 -> "2d". Empty/negative -> "-".
+human_dur() {
+  local s=${1:-}
+  [[ -z $s || $s -lt 0 ]] && { printf -- '-'; return; }
+  if   (( s < 60 ));     then printf '%ds' "$s"
+  elif (( s < 3600 ));   then printf '%dm' $(( s / 60 ))
+  elif (( s < 172800 )); then printf '%dh' $(( s / 3600 ))
+  else                        printf '%dd' $(( s / 86400 )); fi
+}
+
+# "90m" -> 5400. Accepts s/m/h/d; a bare "0" is allowed. Prints seconds.
+parse_dur() {
+  local d=$1
+  [[ $d =~ ^([0-9]+)([smhd])$ || $d == 0 ]] || die "bad duration '$d' (use e.g. 90m, 6h, 2d)"
+  [[ $d == 0 ]] && { echo 0; return; }
+  local n=${BASH_REMATCH[1]} u=${BASH_REMATCH[2]}
+  case $u in s) echo "$n" ;; m) echo $((n*60)) ;; h) echo $((n*3600)) ;; d) echo $((n*86400)) ;; esac
+}
+
+kb_to_mib() { printf '%d' $(( ( ${1:-0} + 512 ) / 1024 )); }
+
+# Claude Code stores transcripts in ~/.claude/projects/<dir with every
+# non-alphanumeric character replaced by '-'>, e.g. /home/k/apps/dalal ->
+# -home-k-apps-dalal. (Very long paths get truncated+hashed by Claude; we
+# don't try to reproduce that — worst case we start plain `claude`.)
+encode_dir() { local d=$1; printf '%s' "${d//[^a-zA-Z0-9]/-}"; }
+
+has_transcripts() {
+  local real
+  real=$(cd -- "$1" && pwd -P) || return 1
+  compgen -G "$CS_CLAUDE_PROJECTS/$(encode_dir "$real")/*.jsonl" >/dev/null
+}
+
+mem_available_mb() {
+  local k v _
+  while read -r k v _; do
+    [[ $k == MemAvailable: ]] && { echo $(( v / 1024 )); return; }
+  done < /proc/meminfo
+  echo 0
+}
+
+# --- 3a. config file ------------------------------------------------------------
+# Format, one project per line:   name | directory | extra claude args
+# Lines starting with # are comments. The directory may contain spaces (only
+# the surrounding whitespace is trimmed) and may start with ~. Extra args are
+# split on whitespace — no quotes, no $variables: the file is DATA, never eval'd.
+declare -a CFG_NAMES=()
+declare -A CFG_DIR=() CFG_ARGS=()
+
+write_default_config() {
+  mkdir -p -- "$(dirname -- "$CS_CONFIG")"
+  {
+    echo "# cs projects — one per line:   name | directory | extra claude args"
+    echo "# name = tmux session name ([a-z0-9][a-z0-9_-]*). Edit with: cs edit"
+    echo "# Example with args:  scratch | ~/scratch | --model sonnet"
+    local pair name dir
+    for pair in "platform|~/platform" "nammamentors|~/namma-mentors-cleanup" \
+                "dalal|~/apps/dalal" "ritual|~/apps/ritual" "focal|~/focal" \
+                "dsa|~/dsa-tracker" "trade|~/trade-engine" "home|~"; do
+      name=${pair%%|*}; dir=${pair#*|}
+      [[ -d ${dir/#\~/$HOME} ]] && printf '%-13s| %-26s|\n' "$name" "$dir"
+    done
+  } > "$CS_CONFIG"
+  warn "created $CS_CONFIG"
+}
+
+load_config() {
+  CFG_NAMES=(); CFG_DIR=(); CFG_ARGS=()
+  [[ -f $CS_CONFIG ]] || write_default_config
+  local line name dir args n=0
+  while IFS= read -r line || [[ -n $line ]]; do
+    n=$((n+1))
+    line=$(trim "$line")
+    [[ -z $line || $line == \#* ]] && continue
+    # `read` with IFS='|' splits on the pipes; the LAST variable gets the rest.
+    IFS='|' read -r name dir args <<<"$line"
+    name=$(trim "$name"); dir=$(trim "${dir:-}"); args=$(trim "${args:-}")
+    if [[ ! $name =~ $NAME_RE ]]; then warn "$CS_CONFIG:$n: bad name '$name', skipped"; continue; fi
+    if [[ -z $dir ]]; then warn "$CS_CONFIG:$n: no directory for '$name', skipped"; continue; fi
+    if [[ -n ${CFG_DIR[$name]+x} ]]; then warn "$CS_CONFIG:$n: duplicate '$name', skipped"; continue; fi
+    # Expand a leading ~ by hand (no eval!).
+    [[ $dir == "~" ]] && dir=$HOME
+    [[ $dir == "~/"* ]] && dir=$HOME/${dir#"~/"}
+    CFG_NAMES+=("$name"); CFG_DIR[$name]=$dir; CFG_ARGS[$name]=$args
+  done < "$CS_CONFIG"
+}
+
+# --- 3b. processes --------------------------------------------------------------
+# One `ps` call gives us the whole process table; we keep it in associative
+# arrays so we can walk the tree (parent -> children) in pure bash.
+# (Same data lives in /proc/<pid>/stat; ps just reads it for us.)
+declare -A P_PPID=() P_RSS=() P_COMM=() P_ETIME=() P_TTY=() KIDS=()
+NOW=0
+load_procs() {
+  P_PPID=(); P_RSS=(); P_COMM=(); P_ETIME=(); P_TTY=(); KIDS=()
+  NOW=$(date +%s)
+  local pid ppid rss et tty comm
+  while read -r pid ppid rss et tty comm; do
+    P_PPID[$pid]=$ppid; P_RSS[$pid]=$rss; P_ETIME[$pid]=$et
+    P_TTY[$pid]=$tty;   P_COMM[$pid]=$comm
+    KIDS[$ppid]+="$pid "
+  done < <(ps -e -o pid=,ppid=,rss=,etimes=,tty=,comm=)
+}
+
+# Is this pid a Claude Code process? The native build shows up as "claude";
+# an npm install shows up as node running .../claude-code/cli.js. We do NOT
+# trust tmux's pane_current_command for this (it may say node or bash).
+CLAUDE_COMM=$(basename -- "$CS_CLAUDE_BIN"); CLAUDE_COMM=${CLAUDE_COMM:0:15}
+is_claude() {
+  local c=${P_COMM[$1]:-}
+  [[ $c == claude || $c == "$CLAUDE_COMM" ]] && return 0
+  if [[ $c == node || $c == bun ]]; then
+    local args
+    args=$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null) || return 1
+    [[ $args == *claude-code* || $args == */claude\ * ]] && return 0
+  fi
+  return 1
+}
+
+# Print the claude pids found below $1 (depth-first). We stop descending at a
+# claude: anything under it (tool shells, MCP servers) belongs to that claude.
+find_claudes() {
+  local pid=$1 kid
+  if is_claude "$pid"; then echo "$pid"; return; fi
+  for kid in ${KIDS[$pid]:-}; do find_claudes "$kid"; done
+}
+
+# Echo pid and all of its descendants — except cs itself ($$) and its own
+# children (like the `ps` above), so running cs doesn't inflate the numbers.
+descendants() {
+  local kid
+  [[ $1 == "$$" ]] && return 0
+  echo "$1"
+  for kid in ${KIDS[$1]:-}; do descendants "$kid"; done
+}
+
+# RSS (resident memory, KiB) of a process plus all its descendants.
+tree_rss() {
+  local p sum=0
+  for p in $(descendants "$1"); do sum=$(( sum + ${P_RSS[$p]:-0} )); done
+  echo "$sum"
+}
+
+# "claude 410M + 3×node 120M + 2×bash 6M" for `cs ram`.
+tree_summary() {
+  local p c out=""
+  local -A cnt=() kb=()
+  for p in $(descendants "$1"); do
+    c=${P_COMM[$p]:-?}; cnt[$c]=$(( ${cnt[$c]:-0} + 1 )); kb[$c]=$(( ${kb[$c]:-0} + ${P_RSS[$p]:-0} ))
+  done
+  # biggest first
+  while read -r _ c; do
+    [[ -n $out ]] && out+=" + "
+    (( cnt[$c] > 1 )) && out+="${cnt[$c]}×"
+    out+="$c $(kb_to_mib "${kb[$c]}")M"
+  done < <(for c in "${!kb[@]}"; do echo "${kb[$c]} $c"; done | sort -rn)
+  printf '%s' "$out"
+}
+
+# Does the process carry a TMUX variable (i.e. was it started inside *some*
+# tmux, perhaps another server)? /proc/<pid>/environ is NUL-separated.
+in_some_tmux() { grep -qz '^TMUX=' "/proc/$1/environ" 2>/dev/null; }
+
+# --- 4. the rows model -----------------------------------------------------------
+# collect() fills parallel arrays, one index per row of `cs ls`:
+#   R_NAME  R_STATE(running|stopped|no-tmux|detached)  R_IDLE(seconds|"")
+#   R_KB(RSS KiB)  R_START(epoch|"")  R_DIR  R_PIDS("1 2")  R_TTY  R_PANE(%id)
+#   R_CONF(1 = in config)  R_CUR(1 = the session you're in)  R_PROT(1 = never stop)
+declare -a R_NAME=() R_STATE=() R_IDLE=() R_KB=() R_START=() R_DIR=() R_PIDS=() \
+           R_TTY=() R_PANE=() R_CONF=() R_CUR=() R_PROT=()
+declare -A S_ROW=()          # tmux session name -> row index
+declare -a ORDER=()          # row indexes in display order
+declare -a OTHER_SESSIONS=() # tmux sessions without claude that aren't projects
+CURRENT_SESSION=""
+declare -A PROT_PID=()       # claude pids that are our own ancestors
+
+# Appends a row and leaves its index in ROW. (It can't `echo` the index:
+# calling it as $(add_row ...) would run it in a subshell and lose the arrays.)
+ROW=0
+add_row() { # name state idle kb start dir pids tty pane conf
+  local i=${#R_NAME[@]}; ROW=$i
+  R_NAME[i]=$1; R_STATE[i]=$2; R_IDLE[i]=$3; R_KB[i]=$4; R_START[i]=$5
+  R_DIR[i]=$6;  R_PIDS[i]=$7;  R_TTY[i]=$8;  R_PANE[i]=$9; R_CONF[i]=${10}
+  R_CUR[i]=0; R_PROT[i]=0
+}
+
+# Work out which session/claude must never be stopped by *this* invocation.
+find_protected() {
+  # (a) the tmux session of the pane we're typing in — but only if that pane
+  #     belongs to the same tmux server cs is inspecting (pane ids like %6 are
+  #     per-server, so a %6 on a test server is a different pane entirely).
+  if [[ -n ${TMUX:-} && -n ${TMUX_PANE:-} && ${TMUX%%,*} == "$(our_socket_path)" ]]; then
+    CURRENT_SESSION=$(tm display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null || true)
+  fi
+  # (b) walk up our own ancestors: if one is claude (e.g. Claude ran `cs` as a
+  #     tool), stopping it would kill the very thing that asked.
+  local p=$$
+  while [[ -n $p && $p != 0 && $p != 1 ]]; do
+    is_claude "$p" && PROT_PID[$p]=1
+    p=${P_PPID[$p]:-}
+  done
+}
+
+collect() {
+  # start from empty state (restart calls collect twice)
+  R_NAME=(); R_STATE=(); R_IDLE=(); R_KB=(); R_START=(); R_DIR=(); R_PIDS=()
+  R_TTY=(); R_PANE=(); R_CONF=(); R_CUR=(); R_PROT=(); S_ROW=(); OTHER_SESSIONS=()
+  CURRENT_SESSION=""; PROT_PID=()
+  load_config
+  load_procs
+  find_protected
+  # Everything about every pane, tab-separated (path last: it may hold spaces).
+  local fmt=$'#{session_name}\t#{pane_id}\t#{pane_pid}\t#{window_activity}\t#{pane_current_path}'
+  local sess pane ppid act path c i
+  local -A seen_claude=() s_act=() s_path=() s_first_pane=() s_pids=() s_pane=() s_cact=()
+  local -a order=()
+  while IFS=$'\t' read -r sess pane ppid act path; do
+    [[ -z ${s_act[$sess]+x} ]] && { order+=("$sess"); s_act[$sess]=0; s_path[$sess]=$path; s_first_pane[$sess]=$pane; }
+    (( act > ${s_act[$sess]} )) && s_act[$sess]=$act
+    for c in $(find_claudes "$ppid"); do
+      seen_claude[$c]=1
+      s_pids[$sess]+="$c "
+      [[ -z ${s_pane[$sess]:-} ]] && s_pane[$sess]=$pane
+      # idle of a running session = activity of the window claude is in
+      (( act > ${s_cact[$sess]:-0} )) && s_cact[$sess]=$act
+    done
+  done < <(tm list-panes -a -F "$fmt" 2>/dev/null || true)
+
+  # one row per tmux session that has claude, or that is a configured project
+  local name pids kb start dir tty idle
+  for sess in "${order[@]}"; do
+    pids=$(trim "${s_pids[$sess]:-}")
+    if [[ -n $pids ]]; then
+      kb=0; start=""; tty=""; dir=""
+      for c in $pids; do
+        kb=$(( kb + $(tree_rss "$c") ))
+        local st=$(( NOW - ${P_ETIME[$c]:-0} ))
+        [[ -z $start || $st -lt $start ]] && start=$st
+        tty=${P_TTY[$c]}
+        [[ -z $dir ]] && dir=$(readlink "/proc/$c/cwd" 2>/dev/null || true)
+      done
+      idle=$(( NOW - ${s_cact[$sess]} ))
+      add_row "$sess" running "$idle" "$kb" "$start" "${dir:-${s_path[$sess]}}" "$pids" "$tty" "${s_pane[$sess]}" 0; i=$ROW
+    elif [[ -n ${CFG_DIR[$sess]+x} ]]; then
+      add_row "$sess" stopped "$(( NOW - ${s_act[$sess]} ))" 0 "" "${s_path[$sess]}" "" "" "${s_first_pane[$sess]}" 0; i=$ROW
+    else
+      OTHER_SESSIONS+=("$sess"); continue
+    fi
+    S_ROW[$sess]=$i
+  done
+  # configured projects without a tmux session
+  for name in "${CFG_NAMES[@]}"; do
+    if [[ -n ${S_ROW[$name]+x} ]]; then R_CONF[${S_ROW[$name]}]=1; R_DIR[${S_ROW[$name]}]=${CFG_DIR[$name]}
+    else add_row "$name" no-tmux "" 0 "" "${CFG_DIR[$name]}" "" "" "" 1; S_ROW[$name]=$ROW; fi
+  done
+  # claude processes outside any tmux at all ("detached"): topmost claude with
+  # no claude ancestor, not under one of our panes, and no TMUX in its env.
+  local p q top
+  for p in "${!P_COMM[@]}"; do
+    is_claude "$p" || continue
+    [[ -n ${seen_claude[$p]:-} ]] && continue
+    top=1; q=${P_PPID[$p]:-}
+    while [[ -n $q && $q != 0 && $q != 1 ]]; do is_claude "$q" && { top=0; break; }; q=${P_PPID[$q]:-}; done
+    (( top )) || continue
+    in_some_tmux "$p" && continue
+    add_row "pid-$p" detached "" "$(tree_rss "$p")" "$(( NOW - ${P_ETIME[$p]:-0} ))" \
+      "$(readlink "/proc/$p/cwd" 2>/dev/null || true)" "$p" "${P_TTY[$p]}" "" 0
+  done
+  # display order: projects in config order, then everything else
+  ORDER=()
+  local -A placed=()
+  for name in "${CFG_NAMES[@]}"; do ORDER+=("${S_ROW[$name]}"); placed[${S_ROW[$name]}]=1; done
+  for i in "${!R_NAME[@]}"; do [[ -n ${placed[$i]:-} ]] || ORDER+=("$i"); done
+  # mark current / protected rows
+  for i in "${!R_NAME[@]}"; do
+    [[ -n $CURRENT_SESSION && ${R_NAME[i]} == "$CURRENT_SESSION" ]] && { R_CUR[i]=1; R_PROT[i]=1; }
+    for c in ${R_PIDS[i]}; do [[ -n ${PROT_PID[$c]:-} ]] && R_PROT[i]=1; done
+  done
+  return 0
+}
+
+pretty_dir() { local d=$1; [[ $d == "$HOME" ]] && d="~"; [[ $d == "$HOME/"* ]] && d="~/${d#"$HOME/"}"; printf '%s' "$d"; }
+fmt_start() { [[ -n $1 ]] && date -d "@$1" '+%b %d %H:%M' || printf -- '-'; }
+
+# --- 5. commands -------------------------------------------------------------------
+cmd_ls() {
+  local json=0
+  [[ ${1:-} == --json ]] && json=1
+  collect
+  if (( json )); then
+    local i
+    for i in "${ORDER[@]}"; do
+      jq -n --arg name "${R_NAME[i]}" --arg state "${R_STATE[i]}" \
+        --arg idle "${R_IDLE[i]}" --argjson kb "${R_KB[i]}" --arg start "${R_START[i]}" \
+        --arg dir "${R_DIR[i]}" --arg pids "${R_PIDS[i]}" --arg tty "${R_TTY[i]}" \
+        --argjson conf "${R_CONF[i]}" --argjson cur "${R_CUR[i]}" --argjson prot "${R_PROT[i]}" \
+        '{name:$name, state:$state,
+          idle_seconds: (if $idle=="" then null else ($idle|tonumber) end),
+          ram_mib: (($kb/1024*10|round)/10),
+          started: (if $start=="" then null else ($start|tonumber|todate) end),
+          dir:$dir, pids: ($pids|split(" ")|map(select(.!="")|tonumber)),
+          tty: (if $tty=="" or $tty=="?" then null else $tty end),
+          configured:($conf==1), current:($cur==1), protected:($prot==1)}'
+    done | jq -s .
+    return
+  fi
+  local w=4 i n=0 kb=0
+  for i in "${!R_NAME[@]}"; do (( ${#R_NAME[i]} > w )) && w=${#R_NAME[i]}; done
+  printf "  %-${w}s  %-8s %5s %7s  %-12s  %s\n" NAME STATE IDLE RAM SINCE DIR
+  for i in "${ORDER[@]}"; do
+    local mark=" " ram="-" extra=""
+    (( R_CUR[i] )) && mark="*"
+    if [[ ${R_STATE[i]} == running || ${R_STATE[i]} == detached ]]; then
+      ram="$(kb_to_mib "${R_KB[i]}")M"; n=$((n+1)); kb=$((kb + R_KB[i]))
+    fi
+    [[ ${R_STATE[i]} == detached ]] && extra="  (pid ${R_PIDS[i]}, tty ${R_TTY[i]})"
+    [[ -n ${R_DIR[i]} && ! -d ${R_DIR[i]} ]] && extra+="  (dir missing)"
+    printf "%s %-${w}s  %-8s %5s %7s  %-12s  %s%s\n" "$mark" "${R_NAME[i]}" "${R_STATE[i]}" \
+      "$(human_dur "${R_IDLE[i]}")" "$ram" "$(fmt_start "${R_START[i]}")" "$(pretty_dir "${R_DIR[i]}")" "$extra"
+  done
+  printf '%d claude session(s) running, %d MiB total' "$n" "$(kb_to_mib "$kb")"
+  [[ -n $CURRENT_SESSION ]] && printf '   (* = you are here)'
+  echo
+  (( ${#OTHER_SESSIONS[@]} )) && echo "other tmux sessions (no claude): ${OTHER_SESSIONS[*]}"
+  return 0
+}
+
+cmd_ram() {
+  collect
+  local i lines="" total=0 c
+  for i in "${!R_NAME[@]}"; do
+    [[ ${R_STATE[i]} == running || ${R_STATE[i]} == detached ]] || continue
+    total=$(( total + R_KB[i] ))
+    local tree=""
+    for c in ${R_PIDS[i]}; do tree+="[$c] $(tree_summary "$c")  "; done
+    lines+="${R_KB[i]}"$'\t'"${R_NAME[i]}"$'\t'"$tree"$'\n'
+  done
+  printf '%-14s %7s  %s\n' NAME RAM 'PROCESS TREE (claude + children, e.g. MCP servers / tool shells)'
+  [[ -n $lines ]] && printf '%s' "$lines" | sort -t$'\t' -k1,1nr | while IFS=$'\t' read -r kb name tree; do
+    printf '%-14s %6sM  %s\n' "$name" "$(kb_to_mib "$kb")" "$tree"
+  done
+  printf '%-14s %6sM\n' TOTAL "$(kb_to_mib "$total")"
+  printf 'MemAvailable: %d MiB\n' "$(mem_available_mb)"
+}
+
+# Find a pane of session $1 that is idle at a shell prompt: its foreground
+# command is a shell AND that shell has no child processes. Prints pane id.
+idle_shell_pane() {
+  local pane ppid cmd
+  while IFS=$'\t' read -r pane ppid cmd; do
+    [[ $SHELLS == *" $cmd "* && -z ${KIDS[$ppid]:-} ]] && { echo "$pane"; return 0; }
+  done < <(tm list-panes -s -t "=$1" -F $'#{pane_id}\t#{pane_pid}\t#{pane_current_command}' 2>/dev/null)
+  return 1
+}
+
+# Start claude for each project. Approach: the tmux session runs a normal
+# login shell and we *type* the command into it (send-keys). Why not make
+# claude the session's command? Because then the session (and window) dies the
+# moment claude exits; with a shell underneath, claude exiting just leaves you
+# at a prompt in the right directory — same as starting it by hand.
+cmd_start() {
+  local fresh=0 force=0 all=0 a
+  local -a names=()
+  for a in "$@"; do
+    case $a in
+      --fresh) fresh=1 ;; --force) force=1 ;; --all) all=1 ;;
+      -*) die "start: unknown option $a" ;;
+      *) names+=("$a") ;;
+    esac
+  done
+  collect
+  (( all )) && names=("${CFG_NAMES[@]}")
+  (( ${#names[@]} )) || die "usage: cs start <name>... | --all  [--fresh] [--force]"
+
+  local free; free=$(mem_available_mb)
+  if (( free < CS_MIN_FREE_MB )); then
+    warn "warning: only ${free} MiB available (threshold ${CS_MIN_FREE_MB} MiB; each claude takes 160-430 MiB)."
+    (( force )) || die "not starting anything; stop idle sessions first (cs stop --idle) or add --force"
+  fi
+
+  local name rc=0
+  for name in "${names[@]}"; do
+    start_one "$name" "$fresh" || rc=1
+  done
+  return "$rc"
+}
+
+start_one() {
+  local name=$1 fresh=$2
+  if [[ ! $name =~ $NAME_RE ]]; then warn "$name: bad name (allowed: [a-z0-9][a-z0-9_-]*)"; return 1; fi
+  if [[ -z ${CFG_DIR[$name]+x} ]]; then warn "$name: not in $CS_CONFIG (add it: cs add $name <dir>)"; return 1; fi
+  local dir=${CFG_DIR[$name]} i=${S_ROW[$name]:-}
+  if [[ ! -d $dir ]]; then warn "$name: directory $dir does not exist"; return 1; fi
+  if [[ -n $i && ${R_STATE[i]} == running ]]; then
+    warn "$name: claude is already running there (pid ${R_PIDS[i]}); use: cs attach $name"; return 1
+  fi
+  # Build the command line. printf %q quotes each word for the shell, so a
+  # directory with spaces or odd characters arrives intact.
+  local -a cmd=("$CS_CLAUDE_BIN")
+  local -a extra=()
+  read -ra extra <<<"${CFG_ARGS[$name]}"   # whitespace split, no globbing, no eval
+  local mode=new
+  if (( ! fresh )) && has_transcripts "$dir"; then cmd+=(--continue); mode=continue; fi
+  cmd+=("${extra[@]}")
+  local line; line="cd -- $(printf '%q' "$dir") && $(printf '%q ' "${cmd[@]}")"
+
+  local pane
+  if tm has-session -t "=$name" 2>/dev/null; then
+    pane=$(idle_shell_pane "$name") || { warn "$name: tmux session exists but no pane is idle at a shell prompt; cs attach $name"; return 1; }
+    echo "$name: reusing tmux session (pane $pane)"
+  else
+    tm new-session -d -s "$name" -c "$dir"
+    pane=$(tm display-message -p -t "=$name:" '#{pane_id}')
+    echo "$name: created tmux session"
+  fi
+  # C-e C-u = go to end of line, delete it: clears any half-typed text so it
+  # can't get glued in front of our command. -l sends the text literally.
+  tm send-keys -t "$pane" C-e C-u
+  tm send-keys -t "$pane" -l -- "$line"
+  tm send-keys -t "$pane" Enter
+
+  # Wait a few seconds for the claude process to show up under the pane.
+  local ppid t c
+  ppid=$(tm display-message -p -t "$pane" '#{pane_pid}')
+  for t in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 0.5; load_procs
+    c=$(find_claudes "$ppid" | head -n1)
+    [[ -n $c ]] && { echo "$name: started claude ($mode conversation) pid $c in $(pretty_dir "$dir")"; return 0; }
+  done
+  echo "$name: command sent ($mode conversation) but no claude process seen yet — check: cs attach $name"
+}
+
+# Print the last 3 non-empty lines of a pane, indented, so you can see what
+# you are about to close (cs can't tell whether you left text in the prompt).
+show_pane_tail() {
+  [[ -n $1 ]] || return 0
+  tm capture-pane -p -t "$1" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 3 | sed 's/^/    | /' || true
+}
+
+# SIGTERM = "please exit" (claude saves and quits). SIGKILL can't be caught —
+# only with --kill, and only after the polite wait has failed.
+term_and_wait() {
+  local label=$1 kill9=$2 pids=$3 p t alive
+  kill -TERM $pids 2>/dev/null || true
+  for (( t = 0; t < CS_STOP_TIMEOUT * 2; t++ )); do
+    alive=""; for p in $pids; do kill -0 "$p" 2>/dev/null && alive+="$p "; done
+    [[ -z $alive ]] && { echo "  stopped $label after $(( (t + 1) / 2 ))s"; return 0; }
+    sleep 0.5
+  done
+  if (( kill9 )); then
+    kill -KILL $alive 2>/dev/null || true
+    echo "  $label did not exit in ${CS_STOP_TIMEOUT}s: sent SIGKILL to $alive"; return 0
+  fi
+  echo "  $label still running after ${CS_STOP_TIMEOUT}s (pid $alive); retry with --kill"; return 1
+}
+
+cmd_stop() {
+  local dry=0 kill9=0 all=0 idle="" a
+  local -a names=() pids=()
+  while (( $# )); do
+    a=$1; shift
+    case $a in
+      --dry-run|-n) dry=1 ;;
+      --kill) kill9=1 ;;
+      --all) all=1 ;;
+      --idle)
+        idle=12h
+        if (( $# )) && [[ $1 != -* ]] && [[ $1 =~ ^[0-9]+[smhd]?$ ]]; then idle=$1; shift; fi ;;
+      --pid) (( $# )) || die "--pid needs a number"; [[ $1 =~ ^[0-9]+$ ]] || die "bad pid '$1'"; pids+=("$1"); shift ;;
+      -*) die "stop: unknown option $a" ;;
+      *) names+=("$a") ;;
+    esac
+  done
+  (( all || ${#names[@]} || ${#pids[@]} )) || [[ -n $idle ]] || die "usage: cs stop <name>... | --idle [DUR] | --all | --pid N  [--dry-run] [--kill]"
+  local secs=""; [[ -n $idle ]] && secs=$(parse_dur "$idle")
+  collect
+
+  # Choose rows. --all/--idle only touch tmux sessions; detached claudes are
+  # stopped explicitly with --pid (we can't see how idle they are).
+  local -a rows=()
+  local i n p rc=0
+  for i in "${!R_NAME[@]}"; do
+    [[ ${R_STATE[i]} == running ]] || continue
+    if (( all )) || { [[ -n $secs ]] && (( R_IDLE[i] >= secs )); }; then rows+=("$i"); fi
+  done
+  for n in "${names[@]}"; do
+    i=${S_ROW[$n]:-}
+    if [[ -z $i ]]; then warn "$n: no such project or tmux session"; rc=1; continue; fi
+    if [[ ${R_STATE[i]} != running ]]; then echo "$n: not running (${R_STATE[i]}), nothing to stop"; continue; fi
+    rows+=("$i")
+  done
+  for p in "${pids[@]}"; do
+    if [[ -z ${P_COMM[$p]:-} ]]; then warn "pid $p: no such process"; rc=1; continue; fi
+    if ! is_claude "$p"; then warn "pid $p (${P_COMM[$p]}): not a claude process, refusing"; rc=1; continue; fi
+    i=""
+    for n in "${!R_NAME[@]}"; do [[ " ${R_PIDS[n]} " == *" $p "* ]] && i=$n; done
+    if [[ -z $i ]]; then add_row "pid-$p" detached "" 0 "" "" "$p" "${P_TTY[$p]}" "" 0; i=$ROW; [[ -n ${PROT_PID[$p]:-} ]] && R_PROT[i]=1; fi
+    rows+=("$i")
+  done
+  (( ${#rows[@]} )) || { echo "nothing to stop${secs:+ (no session idle for $idle or more)}"; return "$rc"; }
+
+  local -A done_=()
+  for i in "${rows[@]}"; do
+    [[ -n ${done_[$i]:-} ]] && continue; done_[$i]=1
+    local name=${R_NAME[i]}
+    if (( R_PROT[i] )); then echo "skipping $name: this is the session you are in"; continue; fi
+    printf '%s %s (pid %s, idle %s, %sM) — last lines on screen:\n' "$( (( dry )) && echo 'would stop' || echo stopping)" \
+      "$name" "$(trim "${R_PIDS[i]}")" "$(human_dur "${R_IDLE[i]}")" "$(kb_to_mib "${R_KB[i]}")"
+    show_pane_tail "${R_PANE[i]}"
+    (( dry )) && continue
+    term_and_wait "$name" "$kill9" "${R_PIDS[i]}" || rc=1
+  done
+  (( dry )) && echo "(dry run: nothing was stopped)"
+  return "$rc"
+}
+
+cmd_attach() {
+  local name=${1:-}; [[ -n $name ]] || die "usage: cs attach <name>"
+  tm has-session -t "=$name" 2>/dev/null || die "$name: no tmux session (start it: cs start $name)"
+  # Inside tmux (same server) you can't nest `attach`; switch the client instead.
+  if [[ -n ${TMUX:-} && ${TMUX%%,*} == "$(our_socket_path)" ]]; then
+    exec tmux ${CS_TMUX_SOCKET:+-L "$CS_TMUX_SOCKET"} switch-client -t "=$name"
+  fi
+  [[ -n ${TMUX:-} ]] && unset TMUX   # attaching to a *different* server from inside tmux
+  exec tmux ${CS_TMUX_SOCKET:+-L "$CS_TMUX_SOCKET"} attach-session -t "=$name"
+}
+
+cmd_restart() {
+  local name="" a fresh=0 force=0
+  for a in "$@"; do case $a in --fresh) fresh=1 ;; --force) force=1 ;; -*) die "restart: unknown option $a" ;; *) name=$a ;; esac; done
+  [[ -n $name ]] || die "usage: cs restart <name> [--fresh] [--force]"
+  collect
+  local i=${S_ROW[$name]:-}
+  if [[ -n $i && ${R_STATE[i]} == running ]]; then
+    (( R_PROT[i] )) && die "skipping $name: this is the session you are in"
+    cmd_stop "$name" || die "$name: stop failed, not restarting"
+    sleep 1   # give the shell a moment to show its prompt again
+  fi
+  local -a args=("$name"); (( fresh )) && args+=(--fresh); (( force )) && args+=(--force)
+  cmd_start "${args[@]}"
+}
+
+cmd_add() {
+  (( $# >= 2 )) || die "usage: cs add <name> <dir> [extra claude args...]"
+  local name=$1 dir=$2; shift 2
+  [[ $name =~ $NAME_RE ]] || die "bad name '$name' (allowed: [a-z0-9][a-z0-9_-]*)"
+  [[ -d $dir ]] || die "directory '$dir' does not exist"
+  dir=$(cd -- "$dir" && pwd)
+  [[ $dir == *'|'* || $* == *'|'* ]] && die "'|' is not allowed (it separates the fields)"
+  load_config
+  [[ -z ${CFG_DIR[$name]+x} ]] || die "$name already exists (cs rm $name first, or cs edit)"
+  printf '%-13s| %-26s| %s\n' "$name" "$(pretty_dir "$dir")" "$*" >> "$CS_CONFIG"
+  echo "added $name -> $(pretty_dir "$dir")${*:+ (args: $*)}"
+}
+
+cmd_rm() {
+  local name=${1:-}; [[ -n $name ]] || die "usage: cs rm <name>"
+  load_config
+  [[ -n ${CFG_DIR[$name]+x} ]] || die "$name is not in $CS_CONFIG"
+  local tmp line first
+  tmp=$(mktemp "$CS_CONFIG.XXXXXX")
+  # copy every line except the one whose first field is $name
+  while IFS= read -r line || [[ -n $line ]]; do
+    first=$(trim "${line%%|*}")
+    [[ $line == *'|'* && $first == "$name" ]] && continue
+    printf '%s\n' "$line"
+  done < "$CS_CONFIG" > "$tmp"
+  mv -- "$tmp" "$CS_CONFIG"
+  echo "removed $name from config (its tmux session, if any, is untouched)"
+}
+
+cmd_edit() {
+  [[ -f $CS_CONFIG ]] || write_default_config
+  exec "${EDITOR:-nano}" "$CS_CONFIG"
+}
+
+# Optional daily cleanup as a *user* systemd timer (no sudo needed; linger
+# keeps the user manager running while logged out). Not installed by default.
+UNIT_DIR=$HOME/.config/systemd/user
+cmd_prune_timer() {
+  export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+  case ${1:-status} in
+    install)
+      mkdir -p -- "$UNIT_DIR"
+      cat > "$UNIT_DIR/cs-prune.service" <<EOF
+[Unit]
+Description=cs: stop Claude Code sessions idle for 24h or more
+
+[Service]
+Type=oneshot
+ExecStart=$SELF stop --idle 24h
+EOF
+      cat > "$UNIT_DIR/cs-prune.timer" <<'EOF'
+[Unit]
+Description=Daily 04:00 cleanup of idle Claude Code sessions (cs)
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+      systemctl --user daemon-reload
+      systemctl --user enable --now cs-prune.timer
+      echo "installed; logs: journalctl --user -u cs-prune.service" ;;
+    remove)
+      systemctl --user disable --now cs-prune.timer 2>/dev/null || true
+      rm -f -- "$UNIT_DIR/cs-prune.service" "$UNIT_DIR/cs-prune.timer"
+      systemctl --user daemon-reload
+      echo "removed" ;;
+    status)
+      if [[ -f $UNIT_DIR/cs-prune.timer ]]; then
+        systemctl --user list-timers cs-prune.timer --no-pager || true
+      else
+        echo "prune timer not installed (enable with: cs prune-timer install)"
+      fi ;;
+    *) die "usage: cs prune-timer install|remove|status" ;;
+  esac
+}
+
+cmd_help() {
+  cat <<EOF
+cs — manage Claude Code sessions in tmux (one tmux session per project)
+
+  cs [ls] [--json]           list projects + tmux sessions running claude
+  cs ram                     RAM per session, biggest first, with process tree
+  cs start <name>... | --all [--fresh] [--force]
+                             open tmux session <name> in its dir and run
+                             'claude --continue' (or plain claude if no history;
+                             --fresh = new conversation; --force = ignore low RAM)
+  cs stop <name>...          SIGTERM claude (tmux session + shell stay)
+  cs stop --idle [DUR]       stop sessions idle >= DUR (default 12h; 90m, 6h, 2d)
+  cs stop --all | --pid N    all tmux claudes / one claude by pid (e.g. detached)
+         [--dry-run] [--kill]  show only / SIGKILL if SIGTERM didn't work in ${CS_STOP_TIMEOUT}s
+  cs restart <name> [--fresh]
+  cs attach <name>           attach (or switch-client if already in tmux)
+  cs add <name> <dir> [args...] | cs rm <name> | cs edit
+  cs prune-timer install|remove|status   optional daily 04:00 'stop --idle 24h'
+  cs -L <socket> ...         use another tmux server (like tmux -L)
+
+config: $CS_CONFIG   (name | directory | extra claude args)
+guide:  ~/platform/SESSIONS.md
+EOF
+}
+
+# --- 6. main --------------------------------------------------------------------------
+main() {
+  if [[ ${1:-} == -L ]]; then
+    [[ -n ${2:-} ]] || die "-L needs a socket name"
+    CS_TMUX_SOCKET=$2; shift 2
+  fi
+  local cmd=${1:-ls}; (( $# )) && shift
+  case $cmd in
+    ls|list)     cmd_ls "$@" ;;
+    --json)      cmd_ls --json ;;
+    ram)         cmd_ram ;;
+    start)       cmd_start "$@" ;;
+    stop)        cmd_stop "$@" ;;
+    restart)     cmd_restart "$@" ;;
+    attach|a)    cmd_attach "$@" ;;
+    add)         cmd_add "$@" ;;
+    rm|remove)   cmd_rm "$@" ;;
+    edit)        cmd_edit ;;
+    prune-timer) cmd_prune_timer "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *) die "unknown command '$cmd' (try: cs help)" ;;
+  esac
+}
+
+main "$@"

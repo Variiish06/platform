@@ -1,0 +1,10 @@
+# cs projects — one per line:   name | directory | extra claude args
+# name = tmux session name ([a-z0-9][a-z0-9_-]*). Edit with: cs edit
+# Example with args:  scratch | ~/scratch | --model sonnet
+platform     | ~/platform                |
+nammamentors | ~/namma-mentors-cleanup   |
+dalal        | ~/apps/dalal              |
+ritual       | ~/apps/ritual             |
+focal        | ~/focal                   |
+dsa          | ~/dsa-tracker             |
+home         | ~                         |
