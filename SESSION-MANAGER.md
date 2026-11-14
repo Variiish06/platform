@@ -1,8 +1,11 @@
-# How to use Claude session control (`cs`)
+# `cs`: the Claude session manager
 
-This is a how-to for running and controlling Claude Code sessions on
-`experimentos`. For the full reference and an explanation of how `cs`
-works inside, see [SESSIONS.md](SESSIONS.md).
+`cs` is the session manager built for this server (`~/platform/tools/cs`,
+on your PATH as `cs`). It keeps one Claude Code session per project in tmux,
+and with one command it can start, list, attach to, stop or restart them,
+show how much RAM each one uses, and stop the idle ones. This guide is about
+how to use `cs`. It is not a guide to Claude Code itself. For the full
+reference and how `cs` works inside, see [SESSIONS.md](SESSIONS.md).
 
 ## The idea in one paragraph
 

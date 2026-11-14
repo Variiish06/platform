@@ -123,7 +123,7 @@ tools/                   cs (Claude Code session manager) and its tests
 
 Tools:
 
-- **Claude sessions**: `cs` (tools/cs) lists, starts (`claude --continue` per project in tmux) and stops idle Claude Code sessions to free RAM; how-to: [CLAUDE-SESSIONS-GUIDE.md](CLAUDE-SESSIONS-GUIDE.md), reference: [SESSIONS.md](SESSIONS.md).
+- **Claude sessions**: `cs` (tools/cs) lists, starts (`claude --continue` per project in tmux) and stops idle Claude Code sessions to free RAM; how-to: [SESSION-MANAGER.md](SESSION-MANAGER.md), reference: [SESSIONS.md](SESSIONS.md).
 - Config: `~/.config/cs/projects.conf` (example: tools/cs.projects.example); tests: `tools/cs-test.sh`.
 
 ## What you must do once

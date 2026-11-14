@@ -716,7 +716,7 @@ cs — manage Claude Code sessions in tmux (one tmux session per project)
   cs -L <socket> ...         use another tmux server (like tmux -L)
 
 config: $CS_CONFIG   (name | directory | extra claude args)
-guide:  ~/platform/CLAUDE-SESSIONS-GUIDE.md (how-to), ~/platform/SESSIONS.md (reference)
+guide:  ~/platform/SESSION-MANAGER.md (how-to), ~/platform/SESSIONS.md (reference)
 EOF
 }
 
