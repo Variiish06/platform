@@ -1,12 +1,13 @@
 // Package docker is a minimal client for the four Docker Engine API
-// calls the dashboard needs: list containers, read stats, restart.
+// calls the dashboard needs: list containers, read stats, restart, stop.
 //
 // It never touches /var/run/docker.sock. It talks to a unix socket
 // published by the docker-socket-proxy container, which forwards only
-// GET list/stats and POST restart, and rejects everything else. So even
-// if Portal were compromised it could not create containers, run
-// commands in them, or read their environment variables (where other
-// apps keep secrets). The worst it could do is restart things.
+// GET list/stats and POST restart/stop, and rejects everything else. So
+// even if Portal were compromised it could not create or delete
+// containers, run commands in them, or read their environment variables
+// (where other apps keep secrets). The worst it could do is restart or
+// stop things.
 package docker
 
 import (
@@ -36,6 +37,10 @@ type Container struct {
 	// Project is the compose project (label com.docker.compose.project),
 	// "" for containers started without compose.
 	Project string
+	// Service is the compose service (label com.docker.compose.service),
+	// e.g. "portal". Together with Project it identifies the platform's
+	// own containers, which Portal refuses to stop.
+	Service string
 
 	// Filled in by the stats collector (see stats.go), running containers only.
 	MemBytes   uint64  // 0 when not running or unknown
@@ -80,6 +85,11 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
+	// 304 Not Modified: Docker's answer to "stop" for a container that is
+	// already stopped. The caller wanted it stopped, and it is.
+	if resp.StatusCode == http.StatusNotModified {
+		return nil
+	}
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
 		return fmt.Errorf("docker %s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(body)))
@@ -119,7 +129,7 @@ func (c *Client) List(ctx context.Context) ([]Container, error) {
 			name = strings.TrimPrefix(r.Names[0], "/")
 		}
 		out = append(out, Container{ID: r.ID, Name: name, Image: r.Image, State: r.State, Status: r.Status,
-			Project: r.Labels["com.docker.compose.project"]})
+			Project: r.Labels["com.docker.compose.project"], Service: r.Labels["com.docker.compose.service"]})
 	}
 	sort.SliceStable(out, func(a, b int) bool {
 		if out[a].Running() != out[b].Running() {
@@ -143,4 +153,15 @@ func (c *Client) Restart(ctx context.Context, id string) error {
 		return fmt.Errorf("docker: invalid container id")
 	}
 	return c.do(ctx, http.MethodPost, "/containers/"+id+"/restart?t=10", nil)
+}
+
+// Stop stops a container, giving it 10 seconds to shut down cleanly
+// before Docker kills it. Stopping an already stopped container is not
+// an error. A container stopped this way stays stopped (restart policy
+// "unless-stopped" included) until something starts it again.
+func (c *Client) Stop(ctx context.Context, id string) error {
+	if !ValidID(id) {
+		return fmt.Errorf("docker: invalid container id")
+	}
+	return c.do(ctx, http.MethodPost, "/containers/"+id+"/stop?t=10", nil)
 }

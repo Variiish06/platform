@@ -100,7 +100,8 @@ type statusInput struct {
 	Apps       appsData
 	Backup     backupData
 	Alerts     alertsData
-	AlertsOn   bool // VictoriaMetrics configured
+	AlertsOn   bool            // VictoriaMetrics configured
+	Silenced   map[string]bool // alert subjects Portal silenced (stopped on purpose)
 	DockerErr  string
 	MemPct     float64 // used, 0..100
 	DiskPct    float64
@@ -118,10 +119,13 @@ func buildStatus(in statusInput) statusView {
 	}
 
 	// Apps.
-	var down []string
+	var down, stopped []string
 	for _, a := range in.Apps.Tiles {
-		if a.State == "down" {
+		switch a.State {
+		case "down":
 			down = append(down, a.Name)
+		case "stopped":
+			stopped = append(stopped, a.Name)
 		}
 	}
 	switch {
@@ -133,14 +137,31 @@ func buildStatus(in statusInput) statusView {
 		add(joinNames(down)+" are down", "bad")
 	case in.Apps.Up == in.Apps.Total:
 		add(fmt.Sprintf("all %d apps up", in.Apps.Total), "")
+	case len(stopped) > 0 && in.Apps.Up+len(stopped) == in.Apps.Total:
+		add(fmt.Sprintf("all %d running apps up", in.Apps.Up), "")
 	default:
 		add(fmt.Sprintf("%d of %d apps checked", in.Apps.Up, in.Apps.Total), "")
+	}
+
+	if len(stopped) > 0 {
+		add(joinNames(stopped)+" stopped", "")
 	}
 
 	// Backups.
 	add(in.Backup.Summary, in.Backup.SummaryLevel)
 
-	// Alerts.
+	// Alerts. Those about something stopped on purpose from Portal (it
+	// holds a silence for it) are counted apart, in plain ink.
+	var live []firingAlert
+	quiet := 0
+	for _, a := range in.Alerts.List {
+		if in.Silenced[a.Subject] {
+			quiet++
+			continue
+		}
+		live = append(live, a)
+	}
+	in.Alerts.List = live
 	switch {
 	case !in.AlertsOn:
 	case in.Alerts.Failed && in.Alerts.At.IsZero():
@@ -166,6 +187,9 @@ func buildStatus(in statusInput) statusView {
 			}
 		}
 		add(plural(len(in.Alerts.List), "alert", "alerts")+" firing: "+strings.Join(names, ", "), level)
+	}
+	if quiet > 0 {
+		add(plural(quiet, "alert", "alerts")+" silenced (stopped on purpose)", "")
 	}
 
 	// Host: only mentioned when something needs attention.
@@ -219,7 +243,8 @@ func (s *Server) statusView() statusView {
 	return buildStatus(statusInput{
 		Apps: s.appsView(), Backup: s.backupView(), Alerts: al, AlertsOn: s.vm.Configured(),
 		DockerErr: dockerErr, MemPct: pct(sys.MemUsed, sys.MemTotal), DiskPct: pct(sys.DiskUsed, sys.DiskTotal),
-		TempC: sys.TempC, TempOK: sys.TempOK, OnBattery: sys.BatteryOK && !sys.ACOnline, BatteryPct: sys.BatteryPercent,
+		Silenced: s.silencedSubjects(),
+		TempC:    sys.TempC, TempOK: sys.TempOK, OnBattery: sys.BatteryOK && !sys.ACOnline, BatteryPct: sys.BatteryPercent,
 	})
 }
 

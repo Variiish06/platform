@@ -46,6 +46,18 @@ type fakeDocker struct {
 	listCalls  atomic.Int32
 	statsCalls atomic.Int32
 	listErr    error
+	// Stop/Restart record the ids they were called with and flip the
+	// container's state, like the real engine.
+	stopped, restarted []string
+	stopErr            error
+}
+
+func (f *fakeDocker) setState(id, state string) {
+	for i := range f.list {
+		if f.list[i].ID == id {
+			f.list[i].State = state
+		}
+	}
 }
 
 func (f *fakeDocker) List(ctx context.Context) ([]docker.Container, error) {
@@ -69,7 +81,24 @@ func (f *fakeDocker) Stats(ctx context.Context, id string) (docker.Stats, error)
 	return docker.Stats{CPU: c, Memory: f.mem[id], MemOK: true}, nil
 }
 
-func (f *fakeDocker) Restart(ctx context.Context, id string) error { return nil }
+func (f *fakeDocker) Restart(ctx context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.restarted = append(f.restarted, id)
+	f.setState(id, "running")
+	return nil
+}
+
+func (f *fakeDocker) Stop(ctx context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stopErr != nil {
+		return f.stopErr
+	}
+	f.stopped = append(f.stopped, id)
+	f.setState(id, "exited")
+	return nil
+}
 
 func id(n int) string { return fmt.Sprintf("%064x", n) }
 

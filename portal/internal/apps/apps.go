@@ -29,6 +29,12 @@ type App struct {
 	Upstream    string `yaml:"upstream"`    // host:port the app really listens on
 	Auth        *bool  `yaml:"auth"`        // require Portal login? default true
 	Health      string `yaml:"health"`      // path to probe, default "/"
+	// Containers are the Docker container names that make up the app.
+	// Optional. When set, the dashboard row gets a Stop/Start button that
+	// acts on exactly these containers (names are matched against the
+	// live container list; unknown ones are shown as an error and never
+	// sent to Docker).
+	Containers []string `yaml:"containers"`
 }
 
 // RequiresAuth reports whether the app sits behind Portal's login.
@@ -52,6 +58,8 @@ type file struct {
 var (
 	idRe       = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 	upstreamRe = regexp.MustCompile(`^[A-Za-z0-9.-]+:[0-9]{1,5}$`)
+	// Docker's own rule for container names.
+	containerRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 )
 
 // Registry holds the current app list and health results. It is safe for
@@ -123,6 +131,16 @@ func (r *Registry) load() error {
 		if !strings.HasPrefix(a.Health, "/") {
 			return fmt.Errorf("%s: app %q: health must start with /", r.path, a.ID)
 		}
+		seen := map[string]bool{}
+		for _, c := range a.Containers {
+			if !containerRe.MatchString(c) {
+				return fmt.Errorf("%s: app %q: container %q is not a valid container name", r.path, a.ID, c)
+			}
+			if seen[c] {
+				return fmt.Errorf("%s: app %q: container %q is listed twice", r.path, a.ID, c)
+			}
+			seen[c] = true
+		}
 		host := a.ID + "." + r.domain
 		if _, dup := byHost[host]; dup {
 			return fmt.Errorf("%s: duplicate app id %q", r.path, a.ID)
@@ -178,6 +196,18 @@ func (r *Registry) ByHost(host string) (App, bool) {
 	defer r.mu.RUnlock()
 	a, ok := r.byHost[host]
 	return a, ok
+}
+
+// ByID finds an app by its id ("focal").
+func (r *Registry) ByID(id string) (App, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, a := range r.apps {
+		if a.ID == id {
+			return a, true
+		}
+	}
+	return App{}, false
 }
 
 // Host returns the public hostname of an app.

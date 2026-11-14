@@ -63,6 +63,9 @@ func config() server.Config {
 		// Memory panel: the host's /proc (read-only). Unset = panel off.
 		HostProc:       os.Getenv("PORTAL_HOST_PROC"),
 		ClaudeSessions: os.Getenv("PORTAL_CLAUDE_SESSIONS"),
+		// Silences for containers stopped from the dashboard. Set it to
+		// "off" to disable.
+		AlertmanagerURL: alertmanagerURL(),
 	}
 }
 
@@ -338,4 +341,14 @@ func healthcheck(cfg server.Config) {
 		fmt.Fprintln(os.Stderr, resp.Status)
 		os.Exit(1)
 	}
+}
+
+// alertmanagerURL: PORTAL_ALERTMANAGER_URL, default Alertmanager on the
+// host's loopback (Portal runs with host networking); "off" disables.
+func alertmanagerURL() string {
+	v := env("PORTAL_ALERTMANAGER_URL", "http://127.0.0.1:9093")
+	if v == "off" {
+		return ""
+	}
+	return v
 }

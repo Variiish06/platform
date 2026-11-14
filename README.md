@@ -83,7 +83,7 @@ Eleven containers in the compose project `platform`. `docker-compose.yml` holds 
 | `caddy` | `caddy:2-alpine` (not pinned) | `:80` on Tailscale IP + LAN IP | 64 MB | Reverse proxy, the only thing facing the network |
 | `coredns` | `coredns/coredns:1.12.1` | `:53` on Tailscale IP | 32 MB | DNS for `*.exp.lab` |
 | `portal` | built from `./portal` (Go) | `127.0.0.1:7080` | 96 MB | Login, dashboard, forward-auth, graphs, `/api/notify`, memory breakdown (reads the host's `/proc` read-only) |
-| `docker-proxy` | `wollomatic/socket-proxy:1.13.2` (digest pinned) | socket `run/portal/docker.sock` | 24 MB | Portal's filtered Docker access: list, stats, restart |
+| `docker-proxy` | `wollomatic/socket-proxy:1.13.2` (digest pinned) | socket `run/portal/docker.sock` | 24 MB | Portal's filtered Docker access: list, stats, restart, stop |
 | `ntfy` | `binwiederhier/ntfy:v2.37.2` | `127.0.0.1:2586` (+ `ntfy:80` on network `platform_internal`) | 64 MB | Notification hub (`compose.notify.yml`) |
 | `victoriametrics` | `victoriametrics/victoria-metrics:v1.155.0` | `127.0.0.1:8428` | 160 MB | Time-series database and scraper, 30-day retention |
 | `vmalert` | `victoriametrics/vmalert:v1.155.0` | `127.0.0.1:8880` | 48 MB | Evaluates alert rules every 30 s |
@@ -172,10 +172,10 @@ Without `http://`, browsers treat `exp.lab` as a search, and Safari may try HTTP
 What the dashboard shows, top to bottom:
 
 - **Status line.** One sentence that says whether everything is fine, for example "All 7 apps up · last backup 2 h ago · no alerts firing". Anything that needs attention comes first, in amber or red, and is also spelled out in words ("Bots is down", "backup failed 01:20", "2 alerts firing: ContainerDown ×2"). Healthy things have no colour at all.
-- **Apps.** One row per app: state (only shown when it is not up), response time, the last 30 days as thin daily segments (hover for the day's %), and uptime %.
+- **Apps.** One row per app: state (only shown when it is not up), response time, the last 30 days as thin daily segments (hover for the day's %), and uptime %. Apps that list their containers in `data/apps.yaml` (`containers:`) also get **Stop** / **Start** (see "Stopping and starting apps" below).
 - **System.** CPU (with a short history line), load, RAM, disk, temperature, power, WiFi.
 - **Memory.** What is using the RAM, split into groups that add up to the total: containers (by compose project), Claude Code sessions (each `claude` CLI with everything it started; idle ones can be stopped with `cs stop --idle`), the Docker engine, your other processes, system services, the kernel, page cache (memory Linux lends to file caching and takes back the moment a program needs it) and free memory. Click a group to see its rows. Portal reads the host's `/proc` read-only for this (see [DECISIONS.md](DECISIONS.md) #81); command lines are shown shortened, with anything that looks like a token or password replaced by `***`.
-- **Containers.** A table: name, project, uptime, CPU, memory, and Restart (or Start). Click a column heading to sort; stopped containers are dimmed at the bottom.
+- **Containers.** A table: name, project, uptime, CPU, memory, and Restart + Stop (or Start). Click a column heading to sort; stopped containers are dimmed at the bottom.
 - **Backups.** The latest run, success, repository, check and restore test, plus "Back up now" and "Restore to staging…".
 - **Notifications.** The last messages from ntfy as a log; high/urgent ones have an amber/red rule.
 
@@ -312,6 +312,16 @@ Save. Within 30 seconds the app is routed, behind the login, on the dashboard an
 - `health: /some/path` changes the path the health check requests.
 - The app must be reachable from the host. An app in Docker needs a published port, for example `127.0.0.1:8095:8095`.
 - If the file has a mistake, the old version stays active and the dashboard shows the error.
+
+- `containers: [name, ...]` gives the row a Stop/Start button for exactly those containers (names as in `docker ps -a`).
+
+## Stopping and starting apps
+
+**Stop** on an app row (or a container row) asks for confirmation, then stops the containers (`docker stop`, 10 s to shut down cleanly). They stay stopped, even across a reboot, until you press **Start** (or run `docker compose up -d` in that project). The app row then says "stopped" in plain ink instead of red "down".
+
+- **Alerts.** Portal creates an Alertmanager silence for each stopped container (`name="<container>"`) and for the app (`app="<id>"`, AppDown): 30 days, created by `portal`. Your phone gets no ContainerDown/AppDown for something you stopped on purpose; the status line says "2 alerts silenced (stopped on purpose)". **Start** from Portal ends those silences about 3 minutes later (the alert needs a minute to resolve). If you start it some other way, the silence stays until it expires, or delete it at http://alerts.exp.lab. If Alertmanager is down, the stop still happens and the page warns you.
+- **Protected.** Portal, Caddy, CoreDNS and the two socket proxies (compose project `platform`) have no Stop button and the API refuses with 403: stopping them would lock you out of the page you need to start them again. Restart still works.
+- Every stop/start is logged with the container, the user and the client IP: `docker compose logs portal | grep -E "stop|start"`.
 
 ## How to change your password
 

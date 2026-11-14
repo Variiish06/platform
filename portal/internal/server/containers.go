@@ -17,6 +17,7 @@ type dockerAPI interface {
 	List(ctx context.Context) ([]docker.Container, error)
 	Stats(ctx context.Context, id string) (docker.Stats, error)
 	Restart(ctx context.Context, id string) error
+	Stop(ctx context.Context, id string) error
 }
 
 // Timeouts for one collection round. The whole round must finish well

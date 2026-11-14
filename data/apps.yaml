@@ -18,6 +18,15 @@
 #                on the host network, so 127.0.0.1 is the server itself.
 #   auth         true (default): Portal login required. false: no Portal login.
 #   health       path to probe (default "/"). Any answer below HTTP 500 is "up".
+#   containers   Docker container names that make up the app (optional), e.g.
+#                [groqbots-orchestrator-1]. Adds a Stop/Start button to the app's
+#                row that acts on exactly these containers. Stopping also
+#                silences their alerts in Alertmanager (30 days); starting from
+#                Portal removes the silence. Names must match `docker ps -a`
+#                exactly; unknown names are shown as an error and nothing is sent
+#                to Docker. Platform containers (portal, caddy, coredns, the
+#                socket proxies) are refused. Leave it out for apps that do not
+#                run in Docker (Ritual) or that you never want stopped from here.
 
 apps:
   - id: focal
@@ -25,6 +34,7 @@ apps:
     description: Pomodoro timer
     icon: timer
     upstream: 127.0.0.1:8787
+    containers: [focal]
 
   - id: ritual
     name: Ritual
@@ -37,12 +47,16 @@ apps:
     description: Groq bot team
     icon: bot
     upstream: 127.0.0.1:8080
+    # Only the long-running orchestrator. Not groqbots-bot-image-1 (a
+    # one-shot image build) or groqbots-testsite-1 (test helper).
+    containers: [groqbots-orchestrator-1]
 
   - id: git
     name: Gitea
     description: Git hosting
     icon: git
     upstream: 127.0.0.1:3000
+    containers: [gitea-gitea-1]
     # Gitea has its own login, and git clients cannot do cookie logins.
     auth: false
     health: /api/healthz

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"portal/internal/docker"
 	"portal/internal/sysinfo"
 )
 
@@ -33,12 +32,18 @@ type statView struct {
 }
 
 type appView struct {
-	Name, Desc, Icon, Host, URL string
-	State                       string // up, down, unknown
-	Detail                      string // "connection refused" when down, "checking" when unknown
-	Latency                     string // "5 ms" when up
-	Open                        bool   // no Portal login in front of it
-	Uptime                      uptimeView
+	ID, Name, Desc, Icon, Host, URL string
+	State                           string // up, down, unknown, stopped
+	Detail                          string // "connection refused" when down, "checking" when unknown
+	Latency                         string // "5 ms" when up
+	Open                            bool   // no Portal login in front of it
+	Uptime                          uptimeView
+	// Stop/Start control, for apps that list containers in apps.yaml:
+	// Ctl is "stop" (some listed container runs), "start" (all stopped)
+	// or "" (no containers listed, or Docker not reachable).
+	Ctl      string
+	CtlNames string // "groqbots-orchestrator-1", for the confirm dialog
+	CtlError string // unknown or protected names: shown, button hidden
 }
 
 type appsData struct {
@@ -59,6 +64,7 @@ type containerView struct {
 	CPU                      string // "3.2%" or "" until two samples exist
 	CPUVal                   float64
 	Running                  bool
+	Protected                bool // platform lifeline: Restart only, never Stop
 }
 
 type containersData struct {
@@ -194,9 +200,12 @@ func buildStats(s sysinfo.Snapshot) []statView {
 
 func (s *Server) appsView() appsData {
 	d := appsData{ConfigError: s.apps.LoadError()}
+	s.mu.RLock()
+	list, dockerErr := s.containers, s.dockerErr
+	s.mu.RUnlock()
 	for _, a := range s.apps.List() {
 		host := s.apps.Host(a)
-		v := appView{Name: a.Name, Desc: a.Description, Icon: a.Icon, Host: host,
+		v := appView{ID: a.ID, Name: a.Name, Desc: a.Description, Icon: a.Icon, Host: host,
 			URL: s.cfg.Scheme() + "://" + host + "/", State: "unknown", Detail: "checking", Open: !a.RequiresAuth()}
 		if st, ok := s.apps.Status(a.ID); ok {
 			if st.Up {
@@ -205,6 +214,26 @@ func (s *Server) appsView() appsData {
 				d.Up++
 			} else {
 				v.State, v.Detail = "down", st.Err
+			}
+		}
+		if len(a.Containers) > 0 && dockerErr == "" && len(list) > 0 {
+			found, problem := appContainers(a, list)
+			v.CtlError = problem
+			if problem == "" {
+				v.Ctl = "start"
+				names := make([]string, len(found))
+				for i, c := range found {
+					names[i] = c.Name
+					if c.Running() {
+						v.Ctl = "stop"
+					}
+				}
+				v.CtlNames = strings.Join(names, ", ")
+				// All its containers are stopped: that is a choice, not an
+				// outage. Say "stopped" in plain ink instead of red "down".
+				if v.Ctl == "start" && v.State != "up" {
+					v.State, v.Detail = "stopped", "stopped"
+				}
 			}
 		}
 		v.Uptime = s.uptimeFor(a.ID)
@@ -264,7 +293,8 @@ func (s *Server) containersView() containersData {
 			d.Running++
 		}
 		v := containerView{ID: c.ID, Name: c.Name, Project: c.Project, Status: c.Status, State: c.State,
-			Mem: fmtBytes(c.MemBytes), MemBytes: c.MemBytes, MemPct: "0", Running: c.Running()}
+			Mem: fmtBytes(c.MemBytes), MemBytes: c.MemBytes, MemPct: "0", Running: c.Running(),
+			Protected: isProtected(c)}
 		if v.Project == "" {
 			v.Project = "–"
 		} else {
@@ -400,43 +430,33 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.sessionToken(r); !ok {
-		http.Error(w, "not signed in", http.StatusUnauthorized)
+	if !s.controlGuard(w, r) {
 		return
 	}
-	if !s.sameOrigin(r) {
-		http.Error(w, "cross-origin request refused", http.StatusForbidden)
-		return
-	}
-	id := r.PathValue("id")
-	// Only IDs from our own list are accepted, so the URL sent to Docker
-	// is never built from arbitrary input.
-	name := ""
-	s.mu.RLock()
-	for _, c := range s.containers {
-		if c.ID == id {
-			name = c.Name
-		}
-	}
-	s.mu.RUnlock()
-	if name == "" || !docker.ValidID(id) {
+	c, ok := s.containerByID(r.PathValue("id"))
+	if !ok {
 		http.Error(w, "unknown container", http.StatusNotFound)
 		return
 	}
-	log.Printf("restart %s requested by %s", name, clientIP(r))
+	verb := "restart"
+	if !c.Running() {
+		verb = "start"
+	}
+	log.Printf("%s %s requested by %s from %s", verb, c.Name, s.cfg.User, clientIP(r))
 	// Detached from the request: if the browser disconnects (or we are
 	// restarting Caddy itself), the restart still completes.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 45*time.Second)
 	defer cancel()
-	if err := s.docker.Restart(ctx, id); err != nil {
-		log.Printf("restart %s: %v", name, err)
+	if err := s.docker.Restart(ctx, c.ID); err != nil {
+		log.Printf("%s %s: %v", verb, c.Name, err)
 		http.Error(w, "Docker refused the restart", http.StatusBadGateway)
 		return
 	}
-	s.collectContainers(ctx)
-	s.publishContainers()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"restarted": name})
+	// Started (or restarted) from here: whatever Portal silenced when it
+	// was stopped is no longer wanted.
+	warn := s.unsilenceAll(ctx, silenceKeys([]string{c.Name}, s.appsWith(c.Name)))
+	s.afterControl(ctx)
+	writeJSON(w, http.StatusOK, map[string]string{"restarted": c.Name, "warning": warn})
 }
 
 // ---- Background work ----
@@ -469,7 +489,9 @@ func (s *Server) publishApps() {
 
 func (s *Server) publishContainers() {
 	s.hub.Publish("containers", strings.TrimSpace(s.fragment("containers", s.containersView())))
-	s.publishStatus()
+	// App rows show Stop/Start from their containers' state. publishApps
+	// also re-renders the status line; the hub drops unchanged fragments.
+	s.publishApps()
 }
 
 // startBackground launches the loops that keep the dashboard current.
@@ -560,6 +582,17 @@ func (s *Server) startBackground(ctx context.Context) {
 			s.publishMemory()
 		})
 	}
+
+	// Portal's own Alertmanager silences (control.go): learn them at start
+	// and every 5 minutes, so the status line knows what was stopped on
+	// purpose even after a Portal restart.
+	loadSilences := func() {
+		if err := s.silencer.Load(ctx); err != nil {
+			log.Printf("alertmanager silences: %v", err)
+		}
+	}
+	go loadSilences()
+	every(5*time.Minute, loadSilences)
 
 	// Firing alerts, for the status sentence.
 	go s.refreshAlerts(ctx)

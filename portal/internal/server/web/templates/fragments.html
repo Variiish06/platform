@@ -15,18 +15,21 @@
   <thead><tr>
     <th scope="col">App</th><th scope="col">What</th><th scope="col">State</th>
     <th scope="col" class="num">Response</th><th scope="col">Last 30 days</th><th scope="col" class="num">Uptime</th>
+    <th scope="col"><span class="visually-hidden">Action</span></th>
   </tr></thead>
   <tbody>
   {{range .Tiles}}
-  <tr data-state="{{.State}}">
+  <tr data-state="{{.State}}" data-app="{{.ID}}">
     <th scope="row" class="name"><a href="{{.URL}}">{{.Name}}</a>{{if .Open}}<span class="ext" title="No Portal login in front of it">public</span>{{end}}</th>
     <td class="desc">{{if .Desc}}{{.Desc}}{{else}}{{.Host}}{{end}}</td>
-    <td class="state">{{if eq .State "down"}}<span data-level="bad"><i class="mark" aria-hidden="true"></i>down · {{.Detail}}</span>{{else if eq .State "unknown"}}<span class="faint">{{.Detail}}</span>{{end}}</td>
+    <td class="state">{{if eq .State "down"}}<span data-level="bad"><i class="mark" aria-hidden="true"></i>down · {{.Detail}}</span>{{else if eq .State "stopped"}}<span class="dim">stopped</span>{{else if eq .State "unknown"}}<span class="faint">{{.Detail}}</span>{{end}}{{if .CtlError}}<span class="ctl-err" data-level="warn" title="{{.CtlError}}">{{.CtlError}}</span>{{end}}</td>
     <td class="num lat mono">{{.Latency}}</td>
     {{/* 30 daily segments, oldest left; the title is the tooltip, the
          aria-label the screen-reader version. */}}
     <td class="strip30">{{with .Uptime}}<span class="days" role="img" aria-label="{{.Aria}}">{{range .Segs}}<i class="{{.Level}}" title="{{.Title}}"></i>{{end}}</span>{{end}}</td>
     <td class="num upct mono">{{with .Uptime}}<span{{if or (eq .Level "warn") (eq .Level "bad")}} data-level="{{.Level}}"{{end}} title="{{.Label}}">{{.Pct}}</span>{{end}}</td>
+    {{/* Only for apps that list containers: in apps.yaml. */}}
+    <td class="act">{{if .Ctl}}<button class="btn sm" type="button" data-ctl="{{.Ctl}}" data-kind="app" data-target="{{.ID}}" data-name="{{.Name}}" data-containers="{{.CtlNames}}" aria-label="{{if eq .Ctl "stop"}}Stop{{else}}Start{{end}} {{.Name}}">{{if eq .Ctl "stop"}}Stop{{else}}Start{{end}}</button>{{end}}</td>
   </tr>
   {{end}}
   </tbody>
@@ -111,7 +114,9 @@
     <td class="up" title="{{.Status}}">{{.Uptime}}{{if .Health}}<span class="health" data-level="{{if eq .Health "unhealthy"}}bad{{else}}warn{{end}}">{{.Health}}</span>{{end}}</td>
     <td class="num cpu mono">{{if .Running}}{{if .CPU}}{{.CPU}}{{else}}…{{end}}{{end}}</td>
     <td class="num memc mono">{{if .Running}}{{.Mem}}<span class="mem-bar" aria-hidden="true"><i data-pct="{{.MemPct}}"></i></span>{{end}}</td>
-    <td class="act"><button class="btn sm" type="button" data-restart="{{.ID}}" data-name="{{.Name}}" data-running="{{.Running}}" aria-label="{{if .Running}}Restart{{else}}Start{{end}} {{.Name}}">{{if .Running}}Restart{{else}}Start{{end}}</button></td>
+    {{/* Running: Restart and Stop (no Stop for the platform's lifeline
+         containers, see control.go). Stopped: Start. */}}
+    <td class="act">{{if .Running}}<button class="btn sm" type="button" data-ctl="restart" data-kind="container" data-target="{{.ID}}" data-name="{{.Name}}" aria-label="Restart {{.Name}}">Restart</button>{{if not .Protected}}<button class="btn sm" type="button" data-ctl="stop" data-kind="container" data-target="{{.ID}}" data-name="{{.Name}}" aria-label="Stop {{.Name}}">Stop</button>{{end}}{{else}}<button class="btn sm" type="button" data-ctl="start" data-kind="container" data-target="{{.ID}}" data-name="{{.Name}}" aria-label="Start {{.Name}}">Start</button>{{end}}</td>
   </tr>
   {{end}}
   </tbody>

@@ -226,8 +226,10 @@ code { font-size: .93em; padding: 0 3px; border: 1px solid var(--rule); border-r
 .ct-t td.memc { width: 1%; white-space: nowrap; }
 .mem-bar { display: inline-block; width: 64px; height: 2px; background: var(--rule); vertical-align: middle; margin-left: 8px; }
 .mem-bar i { display: block; height: 100%; width: 0; background: var(--meter); }
-.ct-t td.act { width: 1%; text-align: right; }
-.ct-t tr.busy { opacity: .55; }
+.ct-t td.act, .apps-t td.act { width: 1%; text-align: right; white-space: nowrap; }
+.act .btn + .btn { margin-left: 6px; }
+.ct-t tr.busy, .apps-t tr.busy { opacity: .55; }
+.apps-t .ctl-err { display: block; white-space: normal; font-size: var(--fs-1); }
 @media (hover: hover) and (min-width: 700px) {
   .ct-t .act .btn { opacity: 0; }
   .ct-t tr:hover .act .btn, .ct-t .act .btn:focus-visible, .ct-t tr.off .act .btn { opacity: 1; }
@@ -242,6 +244,7 @@ code { font-size: .93em; padding: 0 3px; border: 1px solid var(--rule); border-r
 }
 .btn:hover { border-color: var(--ink-3); background: var(--bg-2); }
 .btn.primary { border-color: var(--accent); color: var(--accent); }
+.btn.primary.danger { border-color: var(--bad); color: var(--bad); }
 .btn:disabled { color: var(--ink-3); border-color: var(--rule); cursor: not-allowed; background: transparent; }
 .btn.sm { min-height: 26px; padding: 2px 9px; font-size: 12px; }
 .field { display: grid; gap: 4px; font-size: var(--fs-2); color: var(--ink-2); }
@@ -331,6 +334,8 @@ code { font-size: .93em; padding: 0 3px; border: 1px solid var(--rule); border-r
   .apps-t .state:empty { display: none; }
   .apps-t .strip30 { grid-column: 1; }
   .apps-t .upct { grid-column: 2; }
+  .apps-t td.act { grid-column: 1 / -1; width: auto; text-align: left; }
+  .apps-t td.act:empty { display: none; }
   /* name      cpu  memory  [Restart]
      project   up              */
   .ct-t tr { grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; column-gap: 10px; }

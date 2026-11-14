@@ -79,6 +79,10 @@ services:
       # session's working directory and idle/busy state (/proc/<pid>/cwd
       # is blocked by Docker's AppArmor profile). Only <pid>.json is read.
       PORTAL_CLAUDE_SESSIONS: ""
+      # Containers stopped from the dashboard get an Alertmanager silence
+      # (30 days, createdBy "portal"), expired again when started from the
+      # dashboard. Loopback, no auth. "off" disables silences.
+      PORTAL_ALERTMANAGER_URL: http://127.0.0.1:9093
     volumes:
       # portal.db + apps.yaml (back this up), backup/ (reads status.json,
       # writes requests/). The rest of ./data belongs to other services and
@@ -120,8 +124,10 @@ services:
   # Portal's door to /var/run/docker.sock. It re-exports it as
   # ./run/portal/docker.sock (a directory of its own, so Portal mounts
   # nothing else from ./run) and forwards nothing but the requests matched
-  # below: list and stats (GET) and restart (POST). Inspect, create, exec,
-  # delete, images, volumes... are all refused with 403.
+  # below: list and stats (GET), restart and stop (POST). Inspect, create,
+  # start, kill, exec, delete, images, volumes... are all refused with 403.
+  # (A stopped container is started with restart. Portal refuses to stop
+  # its own lifeline containers itself; see portal/internal/server/control.go.)
   # (The backup container has its own proxy: compose.backup.yml.)
   docker-proxy:
     <<: *defaults
@@ -132,7 +138,7 @@ services:
       - -loglevel=WARN
       - -proxysocketendpoint=/run/docker-proxy/docker.sock
       - -allowGET=/v1\.[0-9]+/containers/(json|[a-zA-Z0-9_.-]+/stats)
-      - -allowPOST=/v1\.[0-9]+/containers/[a-zA-Z0-9_.-]+/restart
+      - -allowPOST=/v1\.[0-9]+/containers/[a-zA-Z0-9_.-]+/(restart|stop)
     network_mode: none                  # no network at all: reachable only via the socket file
     user: "${PUID}:${DOCKER_GID}"       # docker group, so it may open the real socket
     volumes:

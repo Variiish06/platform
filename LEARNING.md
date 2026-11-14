@@ -68,19 +68,19 @@ A fast hash (SHA-256) is the wrong tool, because an attacker who steals the data
 
 A cookie normally belongs to the exact host that set it. A cookie set by `exp.lab` would not be sent to `focal.exp.lab`, and single sign-on would not work.
 
-Setting `Domain=exp.lab` on the cookie tells the browser to send it to `exp.lab` and every subdomain (`portal/internal/server/server.go:339`). That one attribute is what makes one login cover all apps.
+Setting `Domain=exp.lab` on the cookie tells the browser to send it to `exp.lab` and every subdomain (`portal/internal/server/server.go:348`). That one attribute is what makes one login cover all apps.
 
 Browsers refuse this for "public suffixes" such as `com` or `co.uk`. Otherwise one site could set cookies for every `.com` site. The Public Suffix List is the browsers' list of those. `exp.lab` is not on it (see DECISIONS.md), so the cookie is accepted.
 
 The other attributes:
 
-- `HttpOnly` (`server.go:343`): JavaScript cannot read the cookie, so a script-injection bug cannot steal it.
-- `SameSite=Lax` (`server.go:346`): the cookie is sent when you click a link to an app, but not on requests that other websites fire in the background.
+- `HttpOnly` (`server.go:352`): JavaScript cannot read the cookie, so a script-injection bug cannot steal it.
+- `SameSite=Lax` (`server.go:355`): the cookie is sent when you click a link to an app, but not on requests that other websites fire in the background.
 - `Secure`: only sent over HTTPS. Off until HTTPS is added (`COOKIE_SECURE` in `.env`).
 
 Sharing a cookie with every subdomain has a cost: every app would receive the Portal session cookie. A buggy app could leak it. So Caddy removes it from the request before proxying (`caddy/Caddyfile:52`). Apps get their own cookies and never Portal's.
 
-`SameSite` treats `focal.exp.lab` and `exp.lab` as the same site, so it does not stop one app from posting to the dashboard. For that, every state-changing request must carry an `Origin` header equal to `http://exp.lab` (`server.go:365`).
+`SameSite` treats `focal.exp.lab` and `exp.lab` as the same site, so it does not stop one app from posting to the dashboard. For that, every state-changing request must carry an `Origin` header equal to `http://exp.lab` (`server.go:374`).
 
 ## 6. SSE vs WebSockets
 
@@ -88,14 +88,14 @@ The dashboard updates without reloading. The server needs a way to push data to 
 
 **Server-Sent Events (used here).** The browser makes a normal GET request, and the server keeps the response open and writes a few lines of text whenever something changes. One direction only: server to browser.
 
-- The handler: `portal/internal/server/dashboard.go:340`. The content type is set at `dashboard.go:348`.
+- The handler: `portal/internal/server/dashboard.go:370`. The content type is set at `dashboard.go:378`.
 - The wire format is plain text: `event:`, `data:`, blank line (`portal/internal/server/hub.go:37`).
 - The hub copies each update to every open dashboard (`hub.go:65`) and gives a new one the latest state at once (`hub.go:82`).
-- A comment line every 20 seconds keeps idle connections alive (`dashboard.go:375`, written at `dashboard.go:395`).
+- A comment line every 20 seconds keeps idle connections alive (`dashboard.go:405`, written at `dashboard.go:425`).
 - In the browser, `EventSource` does the parsing and reconnects by itself (`portal/internal/server/web/static/app.js:146`). Phones kill background connections, so the page reconnects when it becomes visible (`app.js:173`).
 - The apps table, the container list and the memory panel arrive as ready-made HTML (`app.js:163`). System numbers arrive as JSON and are patched in place (`app.js:166`).
 
-**WebSockets** are a separate protocol with messages in both directions. They suit chat or games. A dashboard only listens, and the one action it has (restart) is an ordinary POST (`dashboard.go:402`). SSE is less code, works through any HTTP proxy and reconnects for free.
+**WebSockets** are a separate protocol with messages in both directions. They suit chat or games. A dashboard only listens, and the one action it has (restart) is an ordinary POST (`dashboard.go:432`). SSE is less code, works through any HTTP proxy and reconnects for free.
 
 ## 7. Rate limiting
 
@@ -104,15 +104,15 @@ Without a limit, a script could try thousands of passwords a minute. With **expo
 - The limiter: `portal/internal/auth/ratelimit.go`. `Allow` at line 47, `Fail` at line 67, the doubling at line 85, reset on success at line 95.
 - It is checked before the password is looked at (`portal/internal/server/auth_handlers.go:115`). A locked-out client cannot test a guess at all, even the right one.
 - A failure is recorded at `auth_handlers.go:157`.
-- Clients are told apart by IP address (`portal/internal/server/server.go:372`). Caddy supplies the real address in `X-Forwarded-For`.
+- Clients are told apart by IP address (`portal/internal/server/server.go:381`). Caddy supplies the real address in `X-Forwarded-For`.
 
 ## 8. Smaller ideas worth knowing
 
-- **Least privilege for Docker.** Access to the Docker socket is root on the host. Portal never gets it. A separate proxy forwards only "list", "stats" and "restart" (`docker-compose.yml:130-131`) and has no network at all (`docker-compose.yml:132`). Its socket is in `run/portal/`, the only part of `run/` Portal mounts (`docker-compose.yml:89`). Portal's client: `portal/internal/docker/docker.go:61` (HTTP over a unix socket), `docker.go:100` (list), `docker.go:141` (restart).
+- **Least privilege for Docker.** Access to the Docker socket is root on the host. Portal never gets it. A separate proxy forwards only "list", "stats", "restart" and "stop" (`docker-compose.yml:140-141`) and has no network at all (`docker-compose.yml:142`). Its socket is in `run/portal/`, the only part of `run/` Portal mounts (`docker-compose.yml:93`). Portal's client: `portal/internal/docker/docker.go:66` (HTTP over a unix socket), `docker.go:110` (list), `docker.go:151` (restart).
 - **Reading the machine.** CPU, memory, battery and WiFi come from kernel pseudo-files, with no tools run: `portal/internal/sysinfo/sysinfo.go:85` (CPU from `/proc/stat`), `:125` (memory), `:167` (temperature), `:206` (WiFi), `:232` (battery from `/sys/class/power_supply`).
 - **Health checks.** Every 30 seconds each app is requested directly (`portal/internal/apps/apps.go:218`). Any answer below HTTP 500 counts as up.
 - **Config hot reload.** `apps.yaml` is re-read when its modification time changes. A broken edit keeps the previous version (`apps.go:141`).
-- **Content-Security-Policy.** A response header that tells the browser to run scripts only from this site (`portal/internal/server/server.go:293`).
+- **Content-Security-Policy.** A response header that tells the browser to run scripts only from this site (`portal/internal/server/server.go:302`).
 - **SQLite in WAL mode.** Lets the CLI write while the server reads (`portal/internal/store/store.go:40`).
 - **Metrics.** `/metrics` is plain text in Prometheus format, written by hand (`portal/internal/server/metrics.go:121`; more in section 10).
 - **Tests.** `portal/internal/auth/*_test.go` cover hashing, session expiry, redirect validation, the rate limiter and TOTP. They run on every image build (`portal/Dockerfile`), so a failing test stops a deploy.
@@ -133,7 +133,7 @@ In ntfy, publishing is one HTTP request: `POST http://ntfy.exp.lab/backups` with
 
 **Three ways to receive.** A subscriber can:
 
-1. **Poll**: ask "anything new since X?" now and then and get an answer that ends. Portal does this every 15 seconds (`portal/internal/server/dashboard.go:590`) with one request for all six topics, `GET /system,backups,.../json?poll=1&since=<last id>` (`portal/internal/notify/notify.go:151`). Simple and robust, but up to 15 seconds late, and every poll costs a request even when nothing happened.
+1. **Poll**: ask "anything new since X?" now and then and get an answer that ends. Portal does this every 15 seconds (`portal/internal/server/dashboard.go:623`) with one request for all six topics, `GET /system,backups,.../json?poll=1&since=<last id>` (`portal/internal/notify/notify.go:151`). Simple and robust, but up to 15 seconds late, and every poll costs a request even when nothing happened.
 2. **Stream**: open one request that never ends, and the server writes each message down it as it happens. Instant and cheap while idle, but the connection must stay open (NOTIFY.md shows `curl -sN .../system/json`).
 3. **Push**: a third party wakes the device when there is something to fetch. Phones need this, because iOS kills background connections to save battery. Only Apple's push service (**APNs**) may wake an app, and only the holder of an app's APNs key may send to it. For the ntfy app, that is the public `ntfy.sh` server.
 
@@ -347,7 +347,7 @@ The same directory matters because a rename across filesystems is a copy plus a 
 
 Access to `/var/run/docker.sock` is root on the host: whoever can talk to it can start a privileged container that mounts `/`. So nothing here talks to it directly. Two separate proxies each allow a different, minimal set of calls (section 8 has the first one):
 
-- **Portal's proxy** allows `GET` container list and stats, and `POST` restart (`docker-compose.yml:130-131`). No network at all (`docker-compose.yml:132`). Its socket is in `run/portal/`, and that is the only part of `run/` Portal mounts (`docker-compose.yml:89`).
+- **Portal's proxy** allows `GET` container list and stats, and `POST` restart and stop (`docker-compose.yml:140-141`). No network at all (`docker-compose.yml:142`). Its socket is in `run/portal/`, and that is the only part of `run/` Portal mounts (`docker-compose.yml:93`).
 - **The backup proxy** allows only what `docker exec … pg_dump` needs in the two Postgres containers: inspect them, create an exec, start it, read its exit code, ping (`compose.backup.yml:168`, `compose.backup.yml:170`). Its socket is mode 600 and owned by root (`compose.backup.yml:159`), in a named Docker volume that only these two containers mount (`compose.backup.yml:112`, `compose.backup.yml:182`). Not even uid 1000 on the host can reach it.
 
 **The limit, stated in the file** (`compose.backup.yml:129`): the proxy filters only the method and path of a request, never its body. The body of an exec-create request chooses the command and can ask for `"Privileged": true`. So whoever controls the backup container can run anything as root in those two Postgres containers, and from there reach the host. Least privilege made the door narrow. It is still a door. The rest of the defence is around it: no listening ports, three capabilities, strict validation of Portal's request files (`backup/scripts/watcher.sh:67`), sanitised status (section 17), and children started with an empty environment (`backup/scripts/lib.sh:103`), so sqlite3 or tar never inherit the restic password or ntfy token.
@@ -369,8 +369,28 @@ Access to `/var/run/docker.sock` is root on the host: whoever can talk to it can
 
 **Be honest about the remainder.** Whatever is left is reported as "unaccounted" (`procmem.go:385`): memory the kernel holds that no file attributes (graphics buffers, drivers), minus anonymous pages shared after `fork()` and counted twice. It is usually around 1% here. If it ever went negative, the panel would show a negative number instead of hiding it.
 
-**Reading /proc safely and cheaply.** Processes come and go while you read, so every file is read once and any error drops only that process (`procmem.go:169`). Kernel threads have no `VmRSS` line and are skipped (`procmem.go:487`). A scan of ~140 processes takes about 4 ms (12 ms inside the container). It runs every 10 s while a dashboard is open and every 60 s otherwise (`portal/internal/server/dashboard.go:552`, `portal/internal/server/memory.go:44`). Only nine low-cardinality series leave the process (`memory.go:297`). Per-pid series would create a new time series for every short-lived process.
+**Reading /proc safely and cheaply.** Processes come and go while you read, so every file is read once and any error drops only that process (`procmem.go:169`). Kernel threads have no `VmRSS` line and are skipped (`procmem.go:487`). A scan of ~140 processes takes about 4 ms (12 ms inside the container). It runs every 10 s while a dashboard is open and every 60 s otherwise (`portal/internal/server/dashboard.go:574`, `portal/internal/server/memory.go:44`). Only nine low-cardinality series leave the process (`memory.go:297`). Per-pid series would create a new time series for every short-lived process.
 
 **Command lines leak secrets.** `/proc/<pid>/cmdline` is world-readable, and tools still put tokens there. Before anything reaches the page, `Sanitize` (`procmem.go:679`) keeps only the program's base name and replaces values after `--token`, `--password`, `-p`, `-H`, `KEY=...`, `Authorization`/`Bearer` and URL credentials with `***`.
 
 Further reading: `man 5 proc` (the `status`, `smaps_rollup` and `meminfo` entries); the kernel's `Documentation/admin-guide/cgroup-v2.rst`.
+
+## 21. Stopping things on purpose: the stop flow and alert silences
+
+A monitoring system cannot tell "it crashed" from "I switched it off". If you stop the bots from the dashboard, the ContainerDown rule (`monitoring/alerts/services.yml`) fires two minutes later and your phone rings. The fix is to tell Alertmanager first, with a **silence**: a stored rule "do not notify for alerts whose labels match X until time T". The alert still fires in vmalert (you can see it in Alertmanager as *suppressed*); it just never reaches ntfy.
+
+**The flow, one request.** `POST /api/apps/bot/stop` (`portal/internal/server/control.go:234`):
+
+1. Same gate as restart: a live session, then `Origin` must be exactly `http://exp.lab` (`control.go:54`), so a page on another site or a compromised sibling app cannot press the button.
+2. Resolve the names from `apps.yaml` against the live container list (`control.go:99`). An unknown name or a platform container stops the whole request with 409. Nothing typed in a file or a URL ever goes to Docker unless it matched a container Docker itself listed.
+3. Refuse the lifeline containers (`control.go:48`): Portal, Caddy, CoreDNS and the socket proxies, matched by compose labels (`project=platform` + service), not by a name substring. Stopping Portal from Portal would leave no button to start it again.
+4. `docker stop` through the socket proxy (`portal/internal/docker/docker.go:162`), which now allows `restart|stop` and still refuses start, kill, exec, create and delete (`docker-compose.yml:141`). "Start" is Docker's restart of a stopped container (`control.go:266`).
+5. Silence `name="<container>"` and `app="bot"` for 30 days, created by `portal` (`control.go:279`, `silences.go:74`). If Alertmanager is unreachable the stop has already happened; the page shows a warning instead of failing (`control.go:152`).
+
+**Ending a silence without a stale alert.** On Start, Portal does not delete the silence at once. vmalert still reports the container as down for up to a minute (30 s scrape + 30 s evaluation), and Alertmanager flushes each alert group every 5 minutes; a silence deleted too early lets that stale ContainerDown through. So Portal moves the silence's end to 3 minutes from now (`silences.go:178`, `silences.go:44`). That change is stored in Alertmanager, so it survives a Portal restart, unlike a timer in memory.
+
+**Memory vs. the source of truth.** Portal remembers the silence ids, but Alertmanager's list is what counts: on Start it looks up active silences with `createdBy=portal` and exactly that one matcher (`silences.go:309`), so a silence made before a Portal restart is still found, and someone else's silence on the same container is left alone. The same check stops a second Stop from piling up duplicates (`silences.go:81`).
+
+**Quiet when off on purpose.** The app row says "stopped" in plain ink, not red "down" (`portal/internal/server/dashboard.go:235`), and the status line counts silenced alerts apart (`portal/internal/server/status.go:158`).
+
+Further reading: Alertmanager docs, "Silences" and the v2 API (`/api/v2/silences`).

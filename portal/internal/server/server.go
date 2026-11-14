@@ -48,6 +48,9 @@ type Config struct {
 	// ClaudeSessions is Claude Code's ~/.claude/sessions, read-only;
 	// optional, it only adds working directories and idle/busy status.
 	ClaudeSessions string
+	// AlertmanagerURL is where Portal creates and expires silences for
+	// containers stopped from the dashboard; empty disables silences.
+	AlertmanagerURL string
 }
 
 // Scheme is the URL scheme browsers use to reach the site.
@@ -114,6 +117,8 @@ type Server struct {
 	memErr       string
 
 	memScan *procmem.Scanner // nil when PORTAL_HOST_PROC is not set
+
+	silencer *silencer // Alertmanager silences for stopped containers (control.go)
 }
 
 // New builds a server. It does not start listening.
@@ -157,6 +162,7 @@ func New(cfg Config, db *sql.DB) (*Server, error) {
 		graphCache: newGraphCache(),
 		backupDir:  backupDir,
 		cpuPrev:    map[string]docker.CPUSample{},
+		silencer:   newSilencer(cfg.AlertmanagerURL),
 	}, nil
 }
 
@@ -214,6 +220,9 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /events", s.wrap("events", s.handleEvents))
 	mux.Handle("GET /api/session", s.wrap("session", s.handleSessionProbe))
 	mux.Handle("POST /api/containers/{id}/restart", s.wrap("restart", s.handleRestart))
+	mux.Handle("POST /api/containers/{id}/stop", s.wrap("stop", s.handleStop))
+	mux.Handle("POST /api/apps/{id}/stop", s.wrap("app_stop", s.handleAppControl("stop")))
+	mux.Handle("POST /api/apps/{id}/start", s.wrap("app_start", s.handleAppControl("start")))
 	mux.Handle("GET /graphs", s.wrap("graphs", s.handleGraphsPage))
 	mux.Handle("GET /api/graphs/{name}", s.wrap("graph_data", s.handleGraphData))
 	mux.Handle("POST /api/backup/run", s.wrap("backup_request", s.handleBackupRun))

@@ -1,6 +1,6 @@
 // Dashboard live updates. No framework: the server renders HTML, and this
 // file only (1) listens to the event stream and swaps content in, and
-// (2) handles sorting, the restart and the backup buttons.
+// (2) handles sorting, the restart/stop/start and the backup buttons.
 (function () {
   'use strict';
   const $ = (sel, root) => (root || document).querySelector(sel);
@@ -133,10 +133,14 @@
   const live = $('#live'), liveText = $('#live-text');
   function setLive(state, text) { if (live) { live.dataset.state = state; liveText.textContent = text; } }
 
-  const busy = new Set(); // container ids with a restart in flight
+  // Keys like "container:<id>" or "app:<id>" with a request in flight.
+  const busy = new Set();
   function markBusy() {
     $$('#containers tr[data-id]').forEach(function (row) {
-      row.classList.toggle('busy', busy.has(row.dataset.id));
+      row.classList.toggle('busy', busy.has('container:' + row.dataset.id));
+    });
+    $$('#apps tr[data-app]').forEach(function (row) {
+      row.classList.toggle('busy', busy.has('app:' + row.dataset.app));
     });
   }
 
@@ -160,7 +164,7 @@
     // Most events carry ready-made HTML from the server's templates;
     // "system" carries JSON for in-place patching.
     source.addEventListener('status', function (e) { swap($('#status'), e.data, true); });
-    source.addEventListener('apps', function (e) { swap($('#apps'), e.data, false); });
+    source.addEventListener('apps', function (e) { swap($('#apps'), e.data, false); markBusy(); });
     source.addEventListener('memory', function (e) { swap($('#memory'), e.data, false); });
     source.addEventListener('containers', function (e) { swap($('#containers'), e.data, false); sortContainers(); markBusy(); });
     source.addEventListener('system', function (e) { updateStats(JSON.parse(e.data)); });
@@ -185,21 +189,45 @@
     toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, isError ? 6000 : 3500);
   }
 
-  // ---- Restart button ------------------------------------------------------
+  // ---- Restart / stop / start buttons ------------------------------------
+  // Every action goes through the confirm dialog first. Stop is the one
+  // that leaves something down, so its confirm button is red.
   const dialog = $('#confirm');
+  const okBtn = $('#confirm-ok');
   let pending = null;
+  const words = {
+    restart: { title: 'Restart ', ok: 'Restart', done: ' restarted' },
+    start: { title: 'Start ', ok: 'Start', done: ' started' },
+    stop: { title: 'Stop ', ok: 'Stop', done: ' stopped' }
+  };
+  function confirmText(job) {
+    const app = job.kind === 'app';
+    const many = app && job.containers.indexOf(',') >= 0;
+    switch (job.action) {
+      case 'restart':
+        return 'It will be unavailable for a few seconds while it restarts.';
+      case 'start':
+        return (app ? 'Starts ' + job.containers + '.' : 'This container is stopped. Starting it brings it back up.') +
+          ' The alert silences Portal set when it was stopped end a few minutes later.';
+      default:
+        return (app ? 'Stops ' + job.containers + '. ' : '') + (many ? 'They stay' : 'It stays') +
+          ' stopped until you start ' + (many ? 'them' : 'it') +
+          ' again here. Alerts about ' + (many ? 'them' : 'it') + ' are silenced in Alertmanager meanwhile (for up to 30 days).';
+    }
+  }
   // One listener on the document (event delegation): the rows are replaced
   // on every update, so listeners on the buttons themselves would be lost.
   document.addEventListener('click', function (e) {
-    const btn = e.target.closest('[data-restart]');
-    if (!btn || busy.has(btn.dataset.restart)) return;
-    const running = btn.dataset.running === 'true';
-    pending = { id: btn.dataset.restart, name: btn.dataset.name, running: running };
-    $('#confirm-title').textContent = (running ? 'Restart ' : 'Start ') + pending.name + '?';
-    $('#confirm-text').textContent = running
-      ? 'It will be unavailable for a few seconds while it restarts.'
-      : 'This container is stopped. Starting it brings it back up.';
-    $('#confirm-ok').textContent = running ? 'Restart' : 'Start';
+    const btn = e.target.closest('[data-ctl]');
+    if (!btn) return;
+    const job = { action: btn.dataset.ctl, kind: btn.dataset.kind, id: btn.dataset.target,
+      name: btn.dataset.name, containers: btn.dataset.containers || '' };
+    if (!words[job.action] || busy.has(job.kind + ':' + job.id)) return;
+    pending = job;
+    $('#confirm-title').textContent = words[job.action].title + job.name + '?';
+    $('#confirm-text').textContent = confirmText(job);
+    okBtn.textContent = words[job.action].ok;
+    okBtn.classList.toggle('danger', job.action === 'stop');
     dialog.returnValue = 'cancel';
     dialog.showModal();
   });
@@ -207,20 +235,31 @@
     if (dialog.returnValue !== 'ok' || !pending) return;
     const job = pending;
     pending = null;
-    busy.add(job.id);
+    const key = job.kind + ':' + job.id;
+    busy.add(key);
     markBusy();
-    fetch('/api/containers/' + job.id + '/restart', { method: 'POST', credentials: 'same-origin' })
+    // A stopped container is started with Docker's restart (the socket
+    // proxy allows restart and stop, nothing else).
+    const url = job.kind === 'app'
+      ? '/api/apps/' + encodeURIComponent(job.id) + '/' + job.action
+      : '/api/containers/' + encodeURIComponent(job.id) + '/' + (job.action === 'stop' ? 'stop' : 'restart');
+    fetch(url, { method: 'POST', credentials: 'same-origin' })
       .then(function (r) {
         if (r.status === 401) { location.href = '/login'; return; }
-        if (!r.ok) throw new Error('status ' + r.status);
-        toast(job.name + (job.running ? ' restarted' : ' started'));
+        return r.text().then(function (t) {
+          let j = {};
+          try { j = JSON.parse(t); } catch (err) { j = { error: t.trim() }; }
+          if (!r.ok) { toast(j.error || ('Failed (' + r.status + ')'), true); return; }
+          if (j.warning) toast(job.name + words[job.action].done + '. ' + j.warning, true);
+          else toast(job.name + words[job.action].done);
+        });
       })
       .catch(function () {
         // Restarting the proxy or Portal itself cuts this very request,
         // so a network error here is not always a failure.
-        toast('Couldn’t confirm ' + job.name + ' restarted. Check the list in a moment.', true);
+        toast('Couldn’t confirm ' + job.name + words[job.action].done + '. Check the list in a moment.', true);
       })
-      .finally(function () { busy.delete(job.id); markBusy(); });
+      .finally(function () { busy.delete(key); markBusy(); });
   });
 
   // ---- Backup buttons -------------------------------------------------------
