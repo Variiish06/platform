@@ -231,8 +231,10 @@ code { font-size: .93em; padding: 0 3px; border: 1px solid var(--rule); border-r
 .ct-t tr.busy, .apps-t tr.busy { opacity: .55; }
 .apps-t .ctl-err { display: block; white-space: normal; font-size: var(--fs-1); }
 @media (hover: hover) and (min-width: 700px) {
-  .ct-t .act .btn { opacity: 0; }
-  .ct-t tr:hover .act .btn, .ct-t .act .btn:focus-visible, .ct-t tr.off .act .btn { opacity: 1; }
+  .ct-t .act .btn, .apps-t .act .btn { opacity: 0; }
+  .ct-t tr:hover .act .btn, .ct-t .act .btn:focus-visible, .ct-t tr.off .act .btn,
+  .apps-t tr:hover .act .btn, .apps-t .act .btn:focus-visible, .apps-t tr.busy .act .btn { opacity: 1; }
+  .apps-t tbody tr:hover td, .apps-t tbody tr:hover th { background: var(--bg-2); }
 }
 .ct-t tbody tr:hover td, .ct-t tbody tr:hover th { background: var(--bg-2); }
 
