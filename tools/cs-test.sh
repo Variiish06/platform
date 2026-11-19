@@ -82,7 +82,7 @@ tt new-session -d -s zz-idle -c "$T"
 echo "== ls with nothing running"
 run ls
 rc_is "ls exits 0" 0
-has   "projects listed as no-tmux" '^ +alpha +no-tmux'
+has   "projects listed as no-tmux" '^ +[0-9]+ +alpha +no-tmux'
 has   "footer says 0 running" '^0 claude session\(s\) running, 0 MiB'
 has   "bad config line warned about" "bad name 'Bad Name'"
 has   "dir missing is flagged" 'ghost.*\(dir missing\)'
@@ -128,7 +128,7 @@ check "no --continue despite transcripts; spaces intact" grep -qxF "$T/p/with sp
 
 echo "== ls shows running + RAM + idle"
 run ls
-has "alpha running with RAM" '^ +alpha +running +[0-9]+[smhd] +[1-9][0-9]*M '
+has "alpha running with RAM" '^ +[0-9]+ +alpha +running +[0-9]+[smhd] +[1-9][0-9]*M '
 has "spaced dir shown" 'spaced +running .*with space'
 has "footer counts 3" '^3 claude session\(s\) running, [1-9][0-9]* MiB'
 hasnt "real sessions invisible" 'platform2'
@@ -182,7 +182,7 @@ check "alpha/beta/spaced gone" bash -c "! kill -0 ${P[alpha]} 2>/dev/null && ! k
 # and ls from inside marks it with '*'
 tt send-keys -t "$win" -l -- "${cmd/stop --idle 0m/ls}"; tt send-keys -t "$win" Enter
 sleep 1.5; OUT=$(cat "$T/inside.out")
-has   "ls marks current session with *" '^\* cur +running'
+has   "ls marks current session with *" '^\* +[0-9]+ +cur +running'
 
 echo "== restart"
 OLD=${P[cur]}
@@ -221,7 +221,9 @@ check "config has newp line with spaces" grep -qE "^newp +\| $T/p/with space *\|
 run add newp "$T/p/alpha";  rc_nz "duplicate add refused"
 run add 'No Good' /tmp;     rc_nz "bad name add refused"
 run add other "$T/nope";    rc_nz "missing dir add refused"
-run ls; has "newp listed" '^ +newp +no-tmux .*with space'
+run ls; has "newp listed" '^ +[0-9]+ +newp +no-tmux .*with space'
+run 99
+rc_nz "cs <#> out of range refused"; has "row range message" "no row 99"
 run start newp
 check "args from config passed" grep -qxF "$T/p/with space|--continue --model x" "$LOG"
 run rm newp

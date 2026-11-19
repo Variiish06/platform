@@ -382,8 +382,10 @@ cmd_ls() {
   fi
   local w=4 i n=0 kb=0
   for i in "${!R_NAME[@]}"; do (( ${#R_NAME[i]} > w )) && w=${#R_NAME[i]}; done
-  printf "  %-${w}s  %-8s %5s %7s  %-12s  %s\n" NAME STATE IDLE RAM SINCE DIR
+  printf "  %2s  %-${w}s  %-8s %5s %7s  %-12s  %s\n" "#" NAME STATE IDLE RAM SINCE DIR
+  local num=0
   for i in "${ORDER[@]}"; do
+    num=$((num+1))
     local mark=" " ram="-" extra=""
     (( R_CUR[i] )) && mark="*"
     if [[ ${R_STATE[i]} == running || ${R_STATE[i]} == detached ]]; then
@@ -391,10 +393,10 @@ cmd_ls() {
     fi
     [[ ${R_STATE[i]} == detached ]] && extra="  (pid ${R_PIDS[i]}, tty ${R_TTY[i]})"
     [[ -n ${R_DIR[i]} && ! -d ${R_DIR[i]} ]] && extra+="  (dir missing)"
-    printf "%s %-${w}s  %-8s %5s %7s  %-12s  %s%s\n" "$mark" "${R_NAME[i]}" "${R_STATE[i]}" \
+    printf "%s %2d  %-${w}s  %-8s %5s %7s  %-12s  %s%s\n" "$mark" "$num" "${R_NAME[i]}" "${R_STATE[i]}" \
       "$(human_dur "${R_IDLE[i]}")" "$ram" "$(fmt_start "${R_START[i]}")" "$(pretty_dir "${R_DIR[i]}")" "$extra"
   done
-  printf '%d claude session(s) running, %d MiB total' "$n" "$(kb_to_mib "$kb")"
+  printf '%d claude session(s) running, %d MiB total   (cs <#> opens one)' "$n" "$(kb_to_mib "$kb")"
   [[ -n $CURRENT_SESSION ]] && printf '   (* = you are here)'
   echo
   (( ${#OTHER_SESSIONS[@]} )) && echo "other tmux sessions (no claude): ${OTHER_SESSIONS[*]}"
@@ -601,6 +603,23 @@ cmd_attach() {
   exec tmux ${CS_TMUX_SOCKET:+-L "$CS_TMUX_SOCKET"} attach-session -t "=$name"
 }
 
+# cs <#>: the row number from `cs ls`. Opens that session: starts claude
+# first when it isn't running (configured projects only), then attaches.
+cmd_open_num() {
+  local num=$1
+  collect
+  (( num >= 1 && num <= ${#ORDER[@]} )) || die "no row $num (cs ls shows 1-${#ORDER[@]})"
+  local i=${ORDER[num-1]}
+  local name=${R_NAME[i]} state=${R_STATE[i]}
+  case $state in
+    detached) die "$name runs outside tmux (pid ${R_PIDS[i]}, tty ${R_TTY[i]}); it can't be attached" ;;
+    running)  ;;
+    *) if [[ -n ${CFG_DIR[$name]+x} ]]; then cmd_start "$name"
+       else die "$name has no claude running and isn't a configured project"; fi ;;
+  esac
+  cmd_attach "$name"
+}
+
 cmd_restart() {
   local name="" a fresh=0 force=0
   for a in "$@"; do case $a in --fresh) fresh=1 ;; --force) force=1 ;; -*) die "restart: unknown option $a" ;; *) name=$a ;; esac; done
@@ -711,6 +730,7 @@ cs — manage Claude Code sessions in tmux (one tmux session per project)
          [--dry-run] [--kill]  show only / SIGKILL if SIGTERM didn't work in ${CS_STOP_TIMEOUT}s
   cs restart <name> [--fresh]
   cs attach <name>           attach (or switch-client if already in tmux)
+  cs <#>                     open row # of 'cs ls': start claude if needed, then attach
   cs add <name> <dir> [args...] | cs rm <name> | cs edit
   cs prune-timer install|remove|status   optional daily 04:00 'stop --idle 24h'
   cs -L <socket> ...         use another tmux server (like tmux -L)
@@ -740,6 +760,7 @@ main() {
     edit)        cmd_edit ;;
     prune-timer) cmd_prune_timer "$@" ;;
     help|-h|--help) cmd_help ;;
+    [0-9]|[0-9][0-9]) cmd_open_num "$((10#$cmd))" ;;
     *) die "unknown command '$cmd' (try: cs help)" ;;
   esac
 }

@@ -27,11 +27,16 @@ cs                              # see what's there
 `cs` on its own lists every project:
 
 ```
-  NAME          STATE     IDLE     RAM  SINCE         DIR
-  platform      no-tmux      -       -  -             ~/platform
-  nammamentors  stopped     4h       -  -             ~/namma-mentors-cleanup
-* platform2     running     0s    394M  Nov 14 10:33  ~
+   #  NAME          STATE     IDLE     RAM  SINCE         DIR
+   1  platform      no-tmux      -       -  -             ~/platform
+   2  nammamentors  running     4m    330M  Nov 19 06:36  ~/namma-mentors-cleanup
+*  8  platform2     running     0s    381M  Nov 14 10:33  ~
 ```
+
+**The quickest way in:** `cs 2` opens row 2. If Claude isn't running
+there, it starts it first (resuming the last conversation), then attaches
+you. The numbers follow the order of your project list, so they stay the
+same from day to day.
 
 | STATE | Meaning | What to do |
 |---|---|---|
@@ -168,6 +173,7 @@ undoes it.
 
 ```
 cs                          list
+cs 2                        open row 2 of the list (starts it if needed)
 cs start NAME [--fresh]     open + resume (or new conversation)
 cs attach NAME              go in            Ctrl-b d = leave it running
 cs stop NAME                stop one         cs stop --idle 2h = stop idle ones
