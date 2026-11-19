@@ -396,11 +396,27 @@ cmd_ls() {
     printf "%s %2d  %-${w}s  %-8s %5s %7s  %-12s  %s%s\n" "$mark" "$num" "${R_NAME[i]}" "${R_STATE[i]}" \
       "$(human_dur "${R_IDLE[i]}")" "$ram" "$(fmt_start "${R_START[i]}")" "$(pretty_dir "${R_DIR[i]}")" "$extra"
   done
-  printf '%d claude session(s) running, %d MiB total   (cs <#> opens one)' "$n" "$(kb_to_mib "$kb")"
+  printf '%d claude session(s) running, %d MiB total' "$n" "$(kb_to_mib "$kb")"
   [[ -n $CURRENT_SESSION ]] && printf '   (* = you are here)'
   echo
   (( ${#OTHER_SESSIONS[@]} )) && echo "other tmux sessions (no claude): ${OTHER_SESSIONS[*]}"
+  (( ${CS_HINTS:-0} )) && cmd_hints
   return 0
+}
+
+# Short command reminder under the bare `cs` list (not `cs ls`, not --json).
+# Hide it with `export CS_HINTS=0` in ~/.bashrc.
+cmd_hints() {
+  local d=$'\e[2m' r=$'\e[0m'
+  [[ -t 1 ]] || { d=""; r=""; }
+  cat <<HINTS
+
+${d}  cs <#>             open that row (starts claude if needed)   Ctrl-b d = leave it running
+  cs start <name>    start/resume          cs stop <name>     stop (conversation is kept)
+  cs stop --idle 2h  stop idle ones        cs ram             who uses the RAM
+  cs restart <name>  stop + start          cs add <name> <dir> / cs rm <name>
+  cs help            all commands          guide: ~/platform/SESSION-MANAGER.md${r}
+HINTS
 }
 
 cmd_ram() {
@@ -746,6 +762,7 @@ main() {
     [[ -n ${2:-} ]] || die "-L needs a socket name"
     CS_TMUX_SOCKET=$2; shift 2
   fi
+  (( $# )) || CS_HINTS=${CS_HINTS:-1}   # bare `cs`: list + command reminder
   local cmd=${1:-ls}; (( $# )) && shift
   case $cmd in
     ls|list)     cmd_ls "$@" ;;
