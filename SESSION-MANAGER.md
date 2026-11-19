@@ -38,6 +38,15 @@ there, it starts it first (resuming the last conversation), then attaches
 you. The numbers follow the order of your project list, so they stay the
 same from day to day.
 
+**Or pick from a menu:** `cs pick` (or `cs p`) shows the same list. Move
+with the arrow keys (or j/k), press Enter to open, a digit to jump to that
+row, and q to quit.
+
+**On login:** every time you SSH in, the list and a short command reminder
+appear on their own. This is a block at the end of `~/.bashrc`; delete it
+to turn it off. It doesn't run inside tmux, and plain `cs` shows the same
+thing any time.
+
 | STATE | Meaning | What to do |
 |---|---|---|
 | `running` | Claude is running in that tmux session | `cs attach <name>` |
@@ -139,9 +148,11 @@ The list lives in `~/.config/cs/projects.conf`, one project per line:
 3. **End of day:** `cs stop --idle 2h`, which leaves anything you used
    recently running.
 
-To let the server do step 3 by itself, run `cs prune-timer install`. It
-then runs `cs stop --idle 24h` every day at 04:00. `cs prune-timer remove`
-undoes it.
+The server also does a cleanup by itself: every day at 04:00 India time,
+`cs stop --idle 24h` stops sessions nobody has touched for a day (the
+conversations are kept). See it with `cs prune-timer status` and its log
+with `journalctl --user -u cs-prune.service`; `cs prune-timer remove`
+turns it off.
 
 ## tmux keys you'll actually need
 
@@ -174,6 +185,7 @@ undoes it.
 ```
 cs                          list
 cs 2                        open row 2 of the list (starts it if needed)
+cs p                        pick with arrow keys, Enter opens
 cs start NAME [--fresh]     open + resume (or new conversation)
 cs attach NAME              go in            Ctrl-b d = leave it running
 cs stop NAME                stop one         cs stop --idle 2h = stop idle ones

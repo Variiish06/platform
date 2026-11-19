@@ -411,7 +411,8 @@ cmd_hints() {
   [[ -t 1 ]] || { d=""; r=""; }
   cat <<HINTS
 
-${d}  cs <#>             open that row (starts claude if needed)   Ctrl-b d = leave it running
+${d}  cs <#>             open that row (starts claude if needed)   cs p = pick with arrow keys
+  Ctrl-b d           leave a session (it keeps running)
   cs start <name>    start/resume          cs stop <name>     stop (conversation is kept)
   cs stop --idle 2h  stop idle ones        cs ram             who uses the RAM
   cs restart <name>  stop + start          cs add <name> <dir> / cs rm <name>
@@ -636,6 +637,59 @@ cmd_open_num() {
   cmd_attach "$name"
 }
 
+# cs pick: arrow-key menu over the same rows as `cs ls`. Up/Down (or k/j)
+# move, Enter opens (starting claude if needed), a digit jumps to that row,
+# q or Esc quits. Pure bash: no fzf needed.
+cmd_pick() {
+  [[ -t 0 && -t 1 ]] || die "cs pick needs a terminal"
+  collect
+  local -a rows=() lines=()
+  local i num=0 w=4 sel=0 mark ram
+  for i in "${!R_NAME[@]}"; do (( ${#R_NAME[i]} > w )) && w=${#R_NAME[i]}; done
+  for i in "${ORDER[@]}"; do
+    num=$((num+1))
+    [[ ${R_STATE[i]} == detached ]] && continue      # can't be attached
+    mark=" "; (( R_CUR[i] )) && mark="*"
+    ram="-"; [[ ${R_STATE[i]} == running ]] && ram="$(kb_to_mib "${R_KB[i]}")M"
+    rows+=("$num")
+    lines+=("$(printf "%s %2d  %-${w}s  %-8s %5s %6s  %s" "$mark" "$num" "${R_NAME[i]}" \
+      "${R_STATE[i]}" "$(human_dur "${R_IDLE[i]}")" "$ram" "$(pretty_dir "${R_DIR[i]}")")")
+  done
+  (( ${#rows[@]} )) || die "nothing to pick"
+  local n=${#rows[@]} key rest k
+  local inv=$'\e[7m' dim=$'\e[2m' off=$'\e[0m'
+  printf '\e[?25l'                                     # hide cursor
+  trap 'printf "\e[?25h"' EXIT
+  draw() {
+    local j
+    for j in "${!lines[@]}"; do
+      if (( j == sel )); then printf '\e[2K%s%s%s\n' "$inv" "${lines[j]}" "$off"
+      else printf '\e[2K%s\n' "${lines[j]}"; fi
+    done
+    printf '\e[2K%s  Up/Down move · Enter open · 1-9 jump · q quit%s\n' "$dim" "$off"
+  }
+  draw
+  while :; do
+    IFS= read -rsn1 key || break
+    if [[ $key == $'\e' ]]; then
+      IFS= read -rsn2 -t 0.05 rest || rest=""
+      case $rest in
+        '[A') key=up ;; '[B') key=down ;; '') key=q ;; *) key="" ;;
+      esac
+    fi
+    case $key in
+      up|k)   (( sel = (sel - 1 + n) % n )) ;;
+      down|j) (( sel = (sel + 1) % n )) ;;
+      '')     break ;;                                # Enter
+      q|Q)    printf '\e[%dA\e[J\e[?25h' "$((n + 1))"; trap - EXIT; return 0 ;;
+      [1-9])  for k in "${!rows[@]}"; do [[ ${rows[k]} == "$key" ]] && sel=$k; done ;;
+    esac
+    printf '\e[%dA' "$((n + 1))"; draw
+  done
+  printf '\e[?25h'; trap - EXIT
+  cmd_open_num "${rows[sel]}"
+}
+
 cmd_restart() {
   local name="" a fresh=0 force=0
   for a in "$@"; do case $a in --fresh) fresh=1 ;; --force) force=1 ;; -*) die "restart: unknown option $a" ;; *) name=$a ;; esac; done
@@ -706,7 +760,7 @@ EOF
 Description=Daily 04:00 cleanup of idle Claude Code sessions (cs)
 
 [Timer]
-OnCalendar=*-*-* 04:00:00
+OnCalendar=*-*-* 04:00:00 Asia/Kolkata
 Persistent=true
 
 [Install]
@@ -747,8 +801,9 @@ cs — manage Claude Code sessions in tmux (one tmux session per project)
   cs restart <name> [--fresh]
   cs attach <name>           attach (or switch-client if already in tmux)
   cs <#>                     open row # of 'cs ls': start claude if needed, then attach
+  cs pick (or cs p)          arrow-key menu: choose a session, Enter opens it
   cs add <name> <dir> [args...] | cs rm <name> | cs edit
-  cs prune-timer install|remove|status   optional daily 04:00 'stop --idle 24h'
+  cs prune-timer install|remove|status  daily 04:00 IST 'stop --idle 24h'
   cs -L <socket> ...         use another tmux server (like tmux -L)
 
 config: $CS_CONFIG   (name | directory | extra claude args)
@@ -778,6 +833,7 @@ main() {
     prune-timer) cmd_prune_timer "$@" ;;
     help|-h|--help) cmd_help ;;
     [0-9]|[0-9][0-9]) cmd_open_num "$((10#$cmd))" ;;
+    pick|p)      cmd_pick ;;
     *) die "unknown command '$cmd' (try: cs help)" ;;
   esac
 }

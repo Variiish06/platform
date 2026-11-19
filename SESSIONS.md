@@ -125,7 +125,7 @@ notes        | ~/My Notes                |      # spaces in the directory are fi
 - **extra args**: split on whitespace. No quotes, no `$VARS`. The file is read
   as data and never executed (`eval`).
 
-## Optional: daily prune timer (not installed)
+## Daily prune timer (installed 19 Nov 2026, 04:00 Asia/Kolkata)
 
 `cs prune-timer install` writes a **user** systemd timer and enables it:
 `~/.config/systemd/user/cs-prune.{service,timer}`. No sudo is needed, and
