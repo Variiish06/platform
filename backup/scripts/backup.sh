@@ -92,6 +92,19 @@ stage_postgres() {
   for spec in "${PG_DBS[@]}"; do
     read -r container db user <<<"$spec"
     out=$STAGING/postgres/$db.sql
+    # A database stopped on purpose (e.g. from the Portal) cannot be dumped,
+    # and its data has not changed since it stopped. Carry the previous
+    # snapshot's dump forward instead of failing the whole backup, so the
+    # dump stays in every new snapshot and retention never drops it.
+    if [ "$(docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null)" != true ]; then
+      restic dump --host "$HOST_TAG" latest "/staging/postgres/$db.sql" >"$out" 2>/dev/null ||
+        die "$container is not running and no earlier dump of $db exists to carry forward (start it, or remove it from PG_DBS)"
+      tail -c 300 "$out" | grep -q 'PostgreSQL database dump complete' ||
+        die "$container is not running and the earlier dump of $db is incomplete"
+      log "  postgres  $container/$db  $(fmt_bytes "$(stat -c %s "$out")")  container stopped: previous dump carried forward"
+      PG_SUMMARY+="  $db.sql  CARRIED FORWARD from the previous snapshot: container $container was stopped  $(stat -c %s "$out") bytes"$'\n'
+      continue
+    fi
     docker exec "$container" pg_dump --username="$user" --dbname="$db" --no-password >"$out"
     [ -s "$out" ] || die "pg_dump of $db produced an empty file"
     # pg_dump writes this marker as its very last line; a dump cut short
